@@ -1,0 +1,38 @@
+# RGB-only baseline: the same code, data, LoRA recipe and schedule as train_rgbd.yaml, with the depth branch
+# not built at all (stock SmolVLA architecture).   python scripts/train.py --config configs/train_rgb.yaml
+data:
+  train_roots: [data/normal_train]
+  val_roots: [data/normal_val]
+  cameras: null
+  depth_cameras: null
+
+model:
+  init_from: lerobot/smolvla_base
+  use_depth: false
+  horizon: 50
+  n_action_steps: 50
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.0
+  lora_targets: [q_proj, k_proj, v_proj, o_proj]
+
+train:
+  mode: lora
+  train_heads: true
+  steps: 5000
+  batch_size: 16
+  grad_accum: 2
+  lr: 1.0e-4
+  decay_lr: 2.5e-6
+  warmup_steps: 200
+  weight_decay: 1.0e-10
+  grad_clip: 10.0
+  precision: bf16
+  seed: 0
+  num_workers: 8
+  log_every: 20
+  save_every: 1000
+  val_every: 500
+  val_batches: 16
+  device: cuda
+  run_dir: runs/rgb_normal_seed0

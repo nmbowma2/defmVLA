@@ -1,0 +1,47 @@
+# RGB + DeFM depth. Frozen: SigLIP, connector, VLM layers, DeFM. Trained: depth fusion, LoRA on the action
+# expert, state / action / time projections.   python scripts/train.py --config configs/train_rgbd.yaml
+data:
+  train_roots: [data/normal_train]            # add data/low_contrast_train for the "normal + low contrast" runs
+  val_roots: [data/normal_val]
+  cameras: null                               # null = every RGB camera in the dataset
+  depth_cameras: null                         # null = every depth camera in the dataset (each must be an RGB camera)
+
+model:
+  init_from: lerobot/smolvla_base             # or the RGB-only run's checkpoint, to warm-start from it
+  use_depth: true
+  horizon: 50                                 # action chunk length (steps)
+  n_action_steps: 50                          # steps executed before re-querying
+  defm_variant: defm_vit_s14                  # defm_vit_l14 = 304M-parameter ablation
+  defm_weights_path: null                     # local .pth for an offline server; null = Hugging Face Hub
+  defm_input_size: 448                        # 448 / 14 = 32 x 32 patches = 4 x 4 per SmolVLA image token
+  depth_pool: unshuffle                       # unshuffle (keeps 4 x 4 detail) | avg
+  depth_hidden: 1024
+  depth_max_m: 0.0                            # 0 = no clamp (raw sensor depth). > 0 clamps far depth to that many metres.
+  depth_dropout: 0.25                         # 0 = always use depth
+  depth_noise_m: 0.0                          # e.g. 0.002 to mimic sensor noise
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.0
+  lora_targets: [q_proj, k_proj, v_proj, o_proj]
+
+train:
+  mode: lora                                  # lora | expert (train all of the action expert) | none
+  train_heads: true                           # state / action / time projections (needed: new state + action dims)
+  steps: 5000
+  batch_size: 16                              # 24 GB (4090): 16 is safe; 48 GB (RTX 6000): 32, grad_accum 1
+  grad_accum: 2                               # effective batch 32
+  lr: 1.0e-4
+  depth_lr_mult: 4.0                          # the fusion MLP + gate start from scratch
+  decay_lr: 2.5e-6
+  warmup_steps: 200
+  weight_decay: 1.0e-10
+  grad_clip: 10.0
+  precision: bf16
+  seed: 0
+  num_workers: 8
+  log_every: 20
+  save_every: 1000
+  val_every: 500
+  val_batches: 16
+  device: cuda                                # pick the GPU with CUDA_VISIBLE_DEVICES
+  run_dir: runs/rgbd_normal_seed0
