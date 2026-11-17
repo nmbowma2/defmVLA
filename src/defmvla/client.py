@@ -1,6 +1,6 @@
 """Client for scripts/serve_policy.py. numpy + stdlib only, so it runs inside the simulator's python env.
 
-    from depthvla.client import PolicyClient
+    from defmvla.client import PolicyClient
     pc = PolicyClient(port=6040)                    # host="gpu-box" to reach a server on another machine
     info = pc.info()                                # cameras, depth cameras, image size, horizon, ...
     pc.reset(seed=episode_seed)                     # at every episode start
@@ -16,7 +16,7 @@ from typing import Dict, Optional
 import numpy as np
 
 DEFAULT_PORT = 6040
-DEFAULT_AUTHKEY = "depthvla"
+DEFAULT_AUTHKEY = "defmvla"
 
 
 class PolicyClient:

@@ -1,4 +1,4 @@
-"""torch Dataset over the episode format of depthvla.episodes (lerobot-style sample dicts).
+"""torch Dataset over the episode format of defmvla.episodes (lerobot-style sample dicts).
 
 Sample:
     observation.images.<cam>   (3, H, W) float32 in [0, 1]

@@ -1,4 +1,4 @@
-# DepthVLA
+# defmVLA
 
 SmolVLA with a frozen [DeFM](https://github.com/leggedrobotics/defm) depth encoder. Depth tokens are added
 element-wise to the RGB image tokens of the same camera; the VLM sees the same number of tokens as stock
@@ -47,7 +47,7 @@ upstream code is copied.
 ## Layout
 
 ```
-src/depthvla/
+src/defmvla/
   fusion.py     DeFMEncoder (frozen), DepthFusion (trainable), depth letterboxing that matches the RGB one
   policy.py     DepthSmolVLAConfig / DepthSmolVLAPolicy, LoRA add / merge, freezing, build_policy / load_policy
   episodes.py   on-disk RGB-D episode format + EpisodeWriter        (numpy + pillow: runs in the Isaac env)
@@ -64,7 +64,7 @@ tests/
 ## Setup (Ubuntu, same steps on the workstation and the server)
 
 ```bash
-git clone <this repo> && cd DepthVLA
+git clone <this repo> && cd defmVLA
 bash envs/setup_env.sh env        # .venv: torch (cu128), lerobot 0.6.1, peft, defm
 bash envs/setup_env.sh weights    # SmolVLA, SmolVLM2 backbone, DeFM -> ~/.cache/huggingface (once, in tmux)
 bash envs/setup_env.sh check      # test suite
@@ -72,7 +72,7 @@ source .venv/bin/activate
 ```
 
 In the Isaac Sim python env only the recorder and the client are needed:
-`./python.sh -m pip install --no-deps -e /path/to/DepthVLA` (numpy and pillow are already there).
+`./python.sh -m pip install --no-deps -e /path/to/defmVLA` (numpy and pillow are already there).
 
 ## 1. Record data in Isaac Sim
 
@@ -86,7 +86,7 @@ area-averaged; depth uses nearest neighbour, so depths are never blended across 
 stay invalid. The model itself resizes RGB to 512 and depth to 448, so storing more than 640 gains nothing.
 
 ```python
-from depthvla.episodes import EpisodeWriter
+from defmvla.episodes import EpisodeWriter
 
 cams = ["left_wrist", "right_wrist", "front"]                       # 2 x D405, 1 x D435
 w = EpisodeWriter("data/normal_train", cameras=cams, depth_cameras=cams, fps=30, square=640)
@@ -144,11 +144,11 @@ condition. It is an open-loop number, not a success rate.
 
 ```bash
 python scripts/merge_for_deploy.py --checkpoint runs/rgbd_normal_seed0/checkpoint_005000
-rsync -avP server:DepthVLA/runs/rgbd_normal_seed0/checkpoint_005000_deploy runs/
+rsync -avP server:defmVLA/runs/rgbd_normal_seed0/checkpoint_005000_deploy runs/
 ```
 
 The `_deploy` directory is self-contained: weights (SmolVLA + DeFM + fusion, LoRA folded in), config,
-normalisation statistics, and `depthvla_contract.json` (cameras, image size, depth convention).
+normalisation statistics, and `defmvla_contract.json` (cameras, image size, depth convention).
 
 ## 5. Serve and roll out (workstation)
 
@@ -161,7 +161,7 @@ python scripts/serve_policy.py --checkpoint runs/checkpoint_005000_deploy --port
 In the Isaac Sim process:
 
 ```python
-from depthvla.client import PolicyClient
+from defmvla.client import PolicyClient
 
 pc = PolicyClient(port=6040, square=640)       # same square= as the EpisodeWriter that recorded the data
 info = pc.info()

@@ -16,7 +16,7 @@ torch = pytest.importorskip("torch")
 pytest.importorskip("lerobot")
 pytest.importorskip("defm")
 
-from depthvla.runtime import make_features, make_processors, preprocess  # noqa: E402
+from defmvla.runtime import make_features, make_processors, preprocess  # noqa: E402
 
 pytestmark = pytest.mark.weights
 
@@ -44,7 +44,7 @@ def raw_batch(bs=2, seed=0):
 
 
 def build(**kw):
-    from depthvla.policy import build_policy
+    from defmvla.policy import build_policy
 
     inputs, outputs = make_features(CAMS, HW, S, A)
     kw.setdefault("use_depth", True)
@@ -162,8 +162,8 @@ def test_only_fusion_lora_and_heads_train(policy, pre):
 
 
 def test_save_load_merge_round_trip(policy, pre, tmp_path):
-    from depthvla.policy import load_policy
-    from depthvla.runtime import load_processors, save_checkpoint
+    from defmvla.policy import load_policy
+    from defmvla.runtime import load_processors, save_checkpoint
 
     # make the adapters and the gate non-trivial, as after training
     torch.manual_seed(0)

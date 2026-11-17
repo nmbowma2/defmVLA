@@ -11,7 +11,7 @@ import yaml
 
 from .data import DEPTH_KEY, RGB_KEY
 
-CONTRACT_FILE = "depthvla_contract.json"
+CONTRACT_FILE = "defmvla_contract.json"
 
 
 # ---------------------------------------------------------------- config: YAML + key.sub=value overrides

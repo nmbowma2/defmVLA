@@ -19,8 +19,8 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
-from depthvla.data import load_low_dim, make_dataset  # noqa: E402
-from depthvla.runtime import load_processors, preprocess, read_contract  # noqa: E402
+from defmvla.data import load_low_dim, make_dataset  # noqa: E402
+from defmvla.runtime import load_processors, preprocess, read_contract  # noqa: E402
 
 
 def main():
@@ -37,7 +37,7 @@ def main():
 
     import torch
 
-    from depthvla.policy import load_policy
+    from defmvla.policy import load_policy
 
     c = read_contract(a.checkpoint)
     policy = load_policy(a.checkpoint, a.device)

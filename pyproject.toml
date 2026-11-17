@@ -3,7 +3,7 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "depthvla"
+name = "defmvla"
 version = "0.1.0"
 description = "SmolVLA with a frozen DeFM depth encoder fused element-wise into the RGB image tokens."
 requires-python = ">=3.11"

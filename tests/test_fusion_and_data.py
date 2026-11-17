@@ -5,8 +5,8 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from depthvla.episodes import EpisodeWriter, depth_m_to_u16, depth_u16_to_m, read_meta, write_synthetic  # noqa: E402
-from depthvla.fusion import DepthFusion, resize_depth_like_rgb, token_grid  # noqa: E402
+from defmvla.episodes import EpisodeWriter, depth_m_to_u16, depth_u16_to_m, read_meta, write_synthetic  # noqa: E402
+from defmvla.fusion import DepthFusion, resize_depth_like_rgb, token_grid  # noqa: E402
 
 
 @pytest.mark.parametrize("pool", ["unshuffle", "avg"])
@@ -74,7 +74,7 @@ def test_depth_u16_round_trip_and_invalid():
 
 
 def test_episode_round_trip(tmp_path):
-    from depthvla.data import check_roots, fit_stats, load_low_dim, make_dataset
+    from defmvla.data import check_roots, fit_stats, load_low_dim, make_dataset
 
     root = write_synthetic(str(tmp_path / "ds"), episodes=2, length=6, hw=(64, 64), state_dim=8, action_dim=7)
     meta = read_meta(root)

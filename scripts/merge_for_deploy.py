@@ -13,7 +13,7 @@ import shutil
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
-from depthvla.runtime import CONTRACT_FILE, read_contract  # noqa: E402
+from defmvla.runtime import CONTRACT_FILE, read_contract  # noqa: E402
 
 
 def main():
@@ -24,7 +24,7 @@ def main():
     a = ap.parse_args()
     out = a.out or a.checkpoint.rstrip("/\\") + "_deploy"
 
-    from depthvla.policy import load_policy
+    from defmvla.policy import load_policy
 
     policy = load_policy(a.checkpoint, a.device)
     had = policy.config.lora_r

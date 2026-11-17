@@ -3,7 +3,7 @@
 import numpy as np
 from PIL import Image
 
-from depthvla.episodes import EpisodeWriter, center_square, depth_u16_to_m, episode_dirs, read_meta
+from defmvla.episodes import EpisodeWriter, center_square, depth_u16_to_m, episode_dirs, read_meta
 
 
 def test_center_square_crops_the_middle_and_keeps_rgb_depth_aligned():

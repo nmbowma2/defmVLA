@@ -26,7 +26,7 @@ case "${1:-}" in
     # torchvision, numpy, omegaconf and huggingface_hub, all present).
     $PIP --no-deps defm
     $PIP --no-deps -e .
-    "$VENV/bin/python" -c "import torch, lerobot, peft, defm, depthvla; print('torch', torch.__version__, 'cuda', torch.cuda.is_available(), 'lerobot', lerobot.__version__)"
+    "$VENV/bin/python" -c "import torch, lerobot, peft, defm, defmvla; print('torch', torch.__version__, 'cuda', torch.cuda.is_available(), 'lerobot', lerobot.__version__)"
     ;;
   weights)
     "$VENV/bin/python" - <<'EOF'

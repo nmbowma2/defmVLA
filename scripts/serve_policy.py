@@ -5,7 +5,7 @@
   ... --host 0.0.0.0        # accept connections from another machine (e.g. serve on the GPU box)
   ... --self-test DIR       # one forward pass on frame 0 of an episode directory, print the chunk, exit
 
-Protocol (multiprocessing.connection, one request -> one reply; client: depthvla.client.PolicyClient):
+Protocol (multiprocessing.connection, one request -> one reply; client: defmvla.client.PolicyClient):
   {"cmd": "info"}                      -> the checkpoint contract (cameras, depth cameras, image size, horizon, ...)
   {"cmd": "reset", "seed": int|None}   -> clears policy state and reseeds the flow-matching noise -> {"ok": true}
   {"cmd": "act", "images": {cam: uint8 (H, W, 3)}, "depth": {cam: float32 metres (H, W) | uint16 mm},
@@ -24,15 +24,15 @@ import time
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
-from depthvla.client import DEFAULT_AUTHKEY, DEFAULT_PORT  # noqa: E402
-from depthvla.runtime import load_processors, observation_batch, preprocess, read_contract  # noqa: E402
+from defmvla.client import DEFAULT_AUTHKEY, DEFAULT_PORT  # noqa: E402
+from defmvla.runtime import load_processors, observation_batch, preprocess, read_contract  # noqa: E402
 
 
 class Runner:
     def __init__(self, checkpoint, device, seed, precision):
         import torch
 
-        from depthvla.policy import load_policy
+        from defmvla.policy import load_policy
 
         self.torch, self.device, self.seed = torch, device, int(seed)
         self.contract = read_contract(checkpoint)

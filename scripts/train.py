@@ -9,7 +9,7 @@
 Frozen: SigLIP, connector, VLM layers, DeFM.  Trained: depth fusion (MLP + gate), the action expert (LoRA
 adapters by default, train.mode=expert for all of it) and, with train.train_heads, the state / action / time
 projections. Checkpoints hold the policy, its pre/post-processors (normalisation statistics of the TRAIN split)
-and depthvla_contract.json, so deployment needs nothing else.
+and defmvla_contract.json, so deployment needs nothing else.
 """
 
 import argparse
@@ -22,8 +22,8 @@ import time
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
-from depthvla.data import DEPTH_KEY, RGB_KEY, check_roots, fit_stats, load_low_dim, make_dataset  # noqa: E402
-from depthvla.runtime import load_config, make_features, make_processors, preprocess, save_checkpoint  # noqa: E402
+from defmvla.data import DEPTH_KEY, RGB_KEY, check_roots, fit_stats, load_low_dim, make_dataset  # noqa: E402
+from defmvla.runtime import load_config, make_features, make_processors, preprocess, save_checkpoint  # noqa: E402
 
 DEFAULTS = {
     "data": {"train_roots": [], "val_roots": [], "cameras": None, "depth_cameras": None},
@@ -105,7 +105,7 @@ def main(argv=None):
 
     import torch
 
-    from depthvla.policy import build_policy
+    from defmvla.policy import build_policy
 
     torch.manual_seed(T["seed"])
     np.random.seed(T["seed"])
