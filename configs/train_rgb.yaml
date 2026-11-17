@@ -20,8 +20,8 @@ train:
   mode: lora
   train_heads: true
   steps: 5000
-  batch_size: 16
-  grad_accum: 2
+  batch_size: 32                              # RTX 4090 24 GB: peak 10.5 GB with 3 RGB + 3 depth cameras (measured, RGB-D); effective batch 32
+  grad_accum: 1
   lr: 1.0e-4
   decay_lr: 2.5e-6
   warmup_steps: 200

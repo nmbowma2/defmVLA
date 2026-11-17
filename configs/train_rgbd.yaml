@@ -28,8 +28,8 @@ train:
   mode: lora                                  # lora | expert (train all of the action expert) | none
   train_heads: true                           # state / action / time projections (needed: new state + action dims)
   steps: 5000
-  batch_size: 16                              # 24 GB (4090): 16 is safe; 48 GB (RTX 6000): 32, grad_accum 1
-  grad_accum: 2                               # effective batch 32
+  batch_size: 32                              # RTX 4090 24 GB: peak 10.5 GB with 3 RGB + 3 depth cameras (measured, RGB-D); effective batch 32
+  grad_accum: 1
   lr: 1.0e-4
   depth_lr_mult: 4.0                          # the fusion MLP + gate start from scratch
   decay_lr: 2.5e-6

@@ -192,8 +192,12 @@ On a Windows laptop (CPU, lerobot 0.6.1, torch 2.11, transformers 5.5, numpy 2.2
   RGB checkpoint), merge, server self-test, client/server round trip (same seed repeats, other seed differs),
   offline eval.
 
-Not run: anything on Linux or a GPU (bf16 autocast path, memory use, speed), Isaac Sim, real data, and any
-training long enough to say whether depth helps. Batch sizes in the configs are estimates.
+On the Ubuntu 24.04 workstation (RTX 4090 24 GB, torch 2.11+cu128): all 17 tests pass on the GPU; 20 RGB-D
+training steps, merge and the serve self-test run end to end in bf16. Measured RGB-D peak memory with 3 RGB + 3
+depth cameras at 640x640: 6.0 GB at batch 16, 10.5 GB at batch 32, about 0.5 s per step at batch 16 on a 2-camera
+dataset (the desktop session holds ~3 GB of the card). The configs use batch 32, grad_accum 1.
+
+Not run: Isaac Sim, real data, and any training long enough to say whether depth helps.
 
 ## Notes
 

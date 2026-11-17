@@ -20,8 +20,11 @@ case "${1:-}" in
       "$VENV/bin/python" -m pip install --upgrade pip
       PIP="$VENV/bin/python -m pip install"
     fi
-    $PIP --extra-index-url https://download.pytorch.org/whl/cu128 \
-        "torch>=2.7,<2.12" torchvision "lerobot[smolvla]==0.6.1" "peft>=0.13" omegaconf pytest pyyaml pillow
+    # torch first, from the CUDA 12.8 index alone (the driver on both machines supports it). Installing it in
+    # the same call as everything else breaks under uv: the PyTorch index carries a stale `requests`, and uv
+    # does not fall back to PyPI for a package that exists on the first index it finds.
+    $PIP --index-url https://download.pytorch.org/whl/cu128 "torch>=2.7,<2.12" torchvision
+    $PIP "lerobot[smolvla]==0.6.1" "peft>=0.13" omegaconf pytest pyyaml pillow
     # defm pins numpy<2, lerobot does not: install it without its dependency pins (it only needs torch,
     # torchvision, numpy, omegaconf and huggingface_hub, all present).
     $PIP --no-deps defm
