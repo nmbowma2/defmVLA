@@ -32,7 +32,10 @@ case "${1:-}" in
     $P --index-url "$TORCH_INDEX" "torch==2.11.0" "torchvision==0.26.0"
     # Isaac Sim lives on NVIDIA's index; its dependencies on PyPI. unsafe-best-match lets uv take each package from
     # whichever index has the right version (the default only looks at the first index that knows the name).
-    $P --extra-index-url https://pypi.nvidia.com --index-strategy unsafe-best-match "isaacsim[all,extscache]==6.2.0.0"
+    # isaacsim-core pins tinyobjloader==2.0.0rc13, a pre-release; some uv versions refuse a pre-release that is only
+    # requested transitively ("no version of tinyobjloader==2.0.0rc13"). Naming it here as a direct requirement lets
+    # uv use it without enabling pre-releases for every other package.
+    $P --extra-index-url https://pypi.nvidia.com --index-strategy unsafe-best-match "isaacsim[all,extscache]==6.2.0.0" "tinyobjloader==2.0.0rc13"
     $P scipy pyyaml pillow opencv-python-headless
     $P --no-deps -e .
     ;;

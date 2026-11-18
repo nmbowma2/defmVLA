@@ -32,7 +32,10 @@ a = ap.parse_args()
 
 from isaacsim import SimulationApp
 
-app = SimulationApp({"headless": True, "width": 1280, "height": 720})
+_g = os.environ.get("DUO_GPU")   # pin Isaac (renderer + physics) to one GPU: DUO_GPU=1
+GPU = {"active_gpu": int(_g), "physics_gpu": int(_g), "multi_gpu": False} if _g else {}
+
+app = SimulationApp({**GPU, "headless": True, "width": 1280, "height": 720})
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import numpy as np
 from defmvla.client import PolicyClient

@@ -6,6 +6,7 @@ Run once per machine: the generated USD stores absolute mesh paths, which is why
   actual  = arms mounted tilted +-45 deg about x (the real rig)     upright = arms not tilted
 """
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -15,7 +16,10 @@ a = ap.parse_args()
 
 from isaacsim import SimulationApp
 
-app = SimulationApp({"headless": True})
+_g = os.environ.get("DUO_GPU")   # pin Isaac (renderer + physics) to one GPU: DUO_GPU=1
+GPU = {"active_gpu": int(_g), "physics_gpu": int(_g), "multi_gpu": False} if _g else {}
+
+app = SimulationApp({**GPU, "headless": True})
 from isaacsim.asset.importer.urdf import URDFImporter, URDFImporterConfig
 
 ROBOT = Path(__file__).resolve().parent / "robot"
