@@ -20,7 +20,7 @@ train = [
     "omegaconf>=2.3",        # defm dependency (defm itself is installed with --no-deps, see envs/setup_env.sh)
     "huggingface-hub",
 ]
-test = ["pytest>=7"]
+test = ["pytest>=7", "scipy"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

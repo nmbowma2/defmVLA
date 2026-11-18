@@ -12,3 +12,7 @@ install.log
 *.safetensors
 *.pth
 *.pt
+logs/
+sim/robot/usd/
+results/
+.venv-isaac/

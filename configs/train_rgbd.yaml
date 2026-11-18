@@ -38,7 +38,7 @@ train:
   grad_clip: 10.0
   precision: bf16
   seed: 0
-  num_workers: 8
+  num_workers: 4                              # 8 workers x 3-camera 640x640 batches exhausted the 31 GB host RAM (OOM kill)
   log_every: 20
   save_every: 1000
   val_every: 500

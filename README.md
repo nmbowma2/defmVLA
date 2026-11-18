@@ -61,20 +61,62 @@ envs/setup_env.sh
 tests/
 ```
 
-## Setup (Ubuntu, same steps on the workstation and the server)
+## Setup (Ubuntu, same steps on every machine)
+
+Two environments: **training / serving** (torch, lerobot, defm) and **Isaac Sim** (the simulator, which pins its own
+numpy / torch). Existing conda envs are fine: activate one and run the same commands; `envs/setup_env.sh` and
+`envs/setup_isaac.sh` install into the *active* env (a new `.venv` / `.venv-isaac` only if none is active).
 
 ```bash
 git clone <this repo> && cd defmVLA
-bash envs/setup_env.sh env        # .venv: torch (cu128), lerobot 0.6.1, peft, defm
-bash envs/setup_env.sh weights    # SmolVLA, SmolVLM2 backbone, DeFM -> ~/.cache/huggingface (once, in tmux)
-bash envs/setup_env.sh check      # test suite
-source .venv/bin/activate
+# training / serving env
+bash envs/check_machine.sh train      # what is missing or has the wrong version (GPU, driver, RAM, disk, packages, weights)
+bash envs/setup_env.sh env            # torch (cu128), lerobot 0.6.1 (pinned), peft, defm, scipy
+bash envs/setup_env.sh weights        # SmolVLA, SmolVLM2 backbone, DeFM -> ~/.cache/huggingface (once)
+bash envs/setup_env.sh check          # test suite (23 tests)
+# Isaac Sim env (only where you record / evaluate in simulation; needs an RTX-class GPU, NOT A100/H100)
+bash envs/check_machine.sh isaac      # needs Isaac Sim 6.x; reports the Vulkan driver, robot USD, ...
+bash envs/setup_isaac.sh env          # skip if your env already has Isaac Sim 6.2 + `pip install --no-deps -e .`
+bash envs/setup_isaac.sh usd          # builds the robot USD from sim/robot (once per machine)
 ```
 
-In the Isaac Sim python env only the recorder and the client are needed:
-`./python.sh -m pip install --no-deps -e /path/to/defmVLA` (numpy and pillow are already there).
+Isaac Sim asks you to accept the NVIDIA Omniverse EULA on first launch; the scripts never accept it for you.
+Long jobs: `bash scripts/run_detached.sh NAME COMMAND...` (systemd user unit / tmux, survives the terminal closing, log in
+`logs/NAME.log`). Memory budget on a 31 GB machine: 4 loader workers for training, 2 recorder processes at once.
+
+## Simulator (`sim/`): the real robot in Isaac Sim
+
+`sim/robot/` holds the prismatic FR3 duo (URDF, the 22 meshes it needs, the xacro sources; Franka assets are Apache-2.0,
+see `LICENSE` / `NOTICE`), so nothing outside this repo is needed. 14 arm joints + 2 gripper commands = 16 DoF; the rail
+slider (+-0.5 m) is held at 0 (`--with-rail` makes it a 17th state / action entry). Variant `actual` = arms mounted tilted
++-45 deg about x (the real rig), `upright` = not tilted.
+
+| File | Purpose |
+|---|---|
+| `sim/duo_env.py` | scene (table, cube, bowl), 3 RGB-D cameras, `normal` / `low_contrast` conditions, per-seed reset (working arm + cube position), state / action layout |
+| `sim/cameras.yaml` | **the camera rig: edit to match the physical mounts / intrinsics**; copied into every dataset as `cameras.json` |
+| `sim/demonstrator.py`, `sim/duo_kin.py` | scripted IK pick-and-place on either arm (finger closing axis held aligned with the cube: 12/12 success vs ~50% before) |
+| `sim/record_duo.py`, `sim/collect_parallel.sh` | record episodes (one or several processes) |
+| `sim/eval_closed_loop.py` | roll a served policy out in Isaac, success rate per seed / arm / condition |
+| `sim/build_usd.py`, `sim/tune_demo.py` | build the USD; measure demonstrator success |
+
+State and action (16): `[left q1..q7, left gripper, right q1..q7, right gripper]`, joint positions, gripper 0 open .. 1 closed;
+action = absolute joint-position target at 15 Hz. Task (both conditions): "pick up the cube and place it in the bowl", with the
+arm on the cube's side (left / right by seed) doing it. Seeds fix the layout: use **train 0.., validation 1,000,000..,
+closed-loop eval 2,000,000..** and the same seeds under `normal` and `low_contrast`.
+
+```bash
+python sim/record_duo.py --out data/normal_train --episodes 50 --seed 0                       # Isaac env
+bash sim/collect_parallel.sh data/low_contrast_train 2 50 0 --condition low_contrast            # 2 processes x 50 episodes
+python scripts/inspect_data.py --root data/normal_train --out runs/inspect.png                  # look before you train
+bash scripts/run_experiment.sh normal "data/normal_train_w0,data/normal_train_w1" data/normal_val 5000   # RGB + RGB-D + offline eval
+python scripts/serve_policy.py --checkpoint runs/normal_rgbd/checkpoint_005000_deploy --port 6040          # train env
+python sim/eval_closed_loop.py --port 6040 --episodes 20 --seed0 2000000 --out results/rgbd_normal.json    # Isaac env
+```
 
 ## 1. Record data in Isaac Sim
+
+For the duo robot use `sim/record_duo.py` (above). The generic recorder API, for any other simulator or robot:
 
 One camera prim gives both RGB and depth, so they are pixel-aligned. Use `distance_to_image_plane` (planar
 z-depth, what a RealSense reports), not `distance_to_camera`.
@@ -197,7 +239,10 @@ training steps, merge and the serve self-test run end to end in bf16. Measured R
 depth cameras at 640x640: 6.0 GB at batch 16, 10.5 GB at batch 32, about 0.5 s per step at batch 16 on a 2-camera
 dataset (the desktop session holds ~3 GB of the card). The configs use batch 32, grad_accum 1.
 
-Not run: Isaac Sim, real data, and any training long enough to say whether depth helps.
+On the workstation with the simulator: 12 + 3 recorded episodes, 1000 steps of RGB-D and RGB-only training (validation loss
+0.0679 vs 0.0702, offline action error equal to within 3%: the task is too easy for depth to matter), and the scripted
+demonstrator at 12/12. Not run: real data, a closed-loop success rate of a policy that has learned the task, and any
+training long enough to say whether depth helps.
 
 ## Notes
 

@@ -1,0 +1,18 @@
+# Camera rig for sim/duo_env.py. EDIT THIS to match the physical rig; the effective values (intrinsics, and the same
+# numbers after the square crop) are copied into every recorded dataset as cameras.json.
+# Units: metres, world frame = rail_link frame, +z up. Intel D405 (wrists) and D435 (front) nominal values.
+front:                       # D435 colour+depth, fixed over the table. Replace eye/target with the real mount pose.
+  eye: [-0.20, 0.0, 1.05]
+  target: [0.42, 0.0, 0.0]
+  resolution: [1280, 720]
+  hfov_deg: 69.4
+  clip: [0.05, 8.0]
+wrist:                       # D405 on each hand: pose = URDF d405 link + this offset in the link7 frame
+  resolution: [848, 480]
+  hfov_deg: 87.0
+  clip: [0.02, 5.0]          # far clip bounds the depth the wrist cameras can see; lower it (e.g. 1.5) to mimic the
+                             # D405's short range / to avoid far background (beyond clip = no reading = 0)
+  offset_xyz: [0.0, 0.0, 0.02]
+sim:
+  fps: 15                    # policy rate; one action per step
+  substeps: 8                # physics steps (1/120 s) per policy step
