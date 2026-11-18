@@ -2,10 +2,12 @@
 # numbers after the square crop) are copied into every recorded dataset as cameras.json.
 # Units: metres, world frame = rail_link frame, +z up. Intel D405 (wrists) and D435 (front) nominal values.
 front:                       # D435 colour+depth, fixed over the table. Replace eye/target with the real mount pose.
-  eye: [-0.20, 0.0, 1.05]
-  target: [0.42, 0.0, 0.0]
-  resolution: [1280, 720]
-  hfov_deg: 69.4
+  # The PhD student's tilted_dual_franka_v1 "ego" camera (640x480, fovy 70 deg; provenance of the numbers unconfirmed):
+  # hfov = 2*atan(tan(35 deg) * 640/480) = 86.07 deg. The square crop (min side, 480) then keeps the full 70 deg.
+  eye: [-0.20, 0.0, 1.25]
+  target: [0.45, 0.0, 0.05]
+  resolution: [640, 480]
+  hfov_deg: 86.07
   clip: [0.05, 8.0]
 wrist:                       # D405 on each hand: pose = URDF d405 link + this offset in the link7 frame
   resolution: [848, 480]
