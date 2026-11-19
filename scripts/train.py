@@ -26,7 +26,8 @@ from defmvla.data import DEPTH_KEY, RGB_KEY, check_roots, fit_stats, load_low_di
 from defmvla.runtime import load_config, make_features, make_processors, preprocess, save_checkpoint  # noqa: E402
 
 DEFAULTS = {
-    "data": {"train_roots": [], "val_roots": [], "cameras": None, "depth_cameras": None},
+    "data": {"train_roots": [], "val_roots": [], "cameras": None, "depth_cameras": None,
+             "arm_prompt": False},   # True: task text "<left|right> arm: ..." (which arm moves is read from the data)
     "model": {"init_from": "lerobot/smolvla_base", "use_depth": True, "horizon": 50, "n_action_steps": 50,
               "defm_variant": "defm_vit_s14", "defm_weights_path": None, "defm_input_size": 448,
               "depth_pool": "unshuffle", "depth_hidden": 1024, "depth_max_m": 0.0, "depth_dropout": 0.25,
@@ -87,8 +88,8 @@ def main(argv=None):
                          f"({meta['cameras']} / {meta['depth_cameras']}); depth cameras must also be RGB cameras")
     if M["use_depth"] and not depth_cameras:
         raise SystemExit("model.use_depth is true but there is no depth camera")
-    train_eps = load_low_dim(D["train_roots"])
-    val_eps = load_low_dim(D["val_roots"]) if D["val_roots"] else []
+    train_eps = load_low_dim(D["train_roots"], D["arm_prompt"])
+    val_eps = load_low_dim(D["val_roots"], D["arm_prompt"]) if D["val_roots"] else []
     stats = fit_stats(train_eps)
     report = {"config": cfg, "cameras": cameras, "depth_cameras": depth_cameras, "image_hw": meta["image_hw"],
               "state_dim": meta["state_dim"], "action_dim": meta["action_dim"], "fps": meta["fps"],
@@ -134,7 +135,7 @@ def main(argv=None):
                 "horizon": M["horizon"], "n_action_steps": M["n_action_steps"], "use_depth": M["use_depth"],
                 "depth": "planar z-depth in metres, pixel-aligned with the RGB of the same camera, 0 = invalid",
                 "depth_max_m": M["depth_max_m"], "defm_variant": M["defm_variant"], "init_from": M["init_from"],
-                "train_roots": D["train_roots"], "train_mode": T["mode"], "lora_r": policy.config.lora_r}
+                "arm_prompt": D["arm_prompt"], "train_roots": D["train_roots"], "train_mode": T["mode"], "lora_r": policy.config.lora_r}
 
     ds = make_dataset(train_eps, M["horizon"], cameras, depth_cameras)
     g = torch.Generator().manual_seed(T["seed"])

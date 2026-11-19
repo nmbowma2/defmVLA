@@ -100,3 +100,15 @@ def test_writer_rejects_misaligned_depth(tmp_path):
                     np.zeros(4), np.zeros(4))
     with pytest.raises(ValueError):
         EpisodeWriter(str(tmp_path / "y"), ["front"], ["wrist"], fps=10)
+
+
+def test_working_arm_and_arm_prompt():
+    from defmvla.data import arm_task, working_arm
+    T = 30
+    s = np.zeros((T, 16), np.float32)
+    s[:, 8:15] = 1.2                                    # right arm parked (constant)
+    s[:, :7] = np.linspace(0, 1, T)[:, None]            # left arm moves
+    assert working_arm(s) == "left"
+    assert arm_task("pick up the cube", s) == "left arm: pick up the cube"
+    s2 = s.copy(); s2[:, :7] = 0.3; s2[:, 8:15] = np.linspace(0, 1, T)[:, None]
+    assert working_arm(s2) == "right"

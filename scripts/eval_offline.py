@@ -48,7 +48,7 @@ def main():
     report = {"checkpoint": os.path.abspath(a.checkpoint), "stride": a.stride, "splits": {}}
     for item in a.roots:
         name, root = item.split("=", 1)
-        eps = load_low_dim([root])
+        eps = load_low_dim([root], c.get("arm_prompt", False))
         ds = make_dataset(eps, cfg.chunk_size, c["cameras"], c["depth_cameras"])
         sub = torch.utils.data.Subset(ds, list(range(0, len(ds), a.stride)))
         loader = torch.utils.data.DataLoader(sub, batch_size=a.batch_size, num_workers=a.num_workers)

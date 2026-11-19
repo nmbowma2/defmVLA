@@ -25,16 +25,30 @@ RGB_KEY = "observation.images.{}"
 DEPTH_KEY = "observation.depth.{}"
 
 
-def load_low_dim(roots: Sequence[str]) -> List[Dict]:
-    """Per episode: dir, state (T, S), action (T, A), task. Reads no images."""
+def working_arm(state: np.ndarray) -> str:
+    """'left' | 'right': the arm that moves in an episode (state = [left q1..q7, gripper, right q1..q7, gripper, ...]);
+    the other one stays parked, so its joints are constant."""
+    state = np.asarray(state)
+    return "left" if np.ptp(state[:, :7], axis=0).sum() >= np.ptp(state[:, 8:15], axis=0).sum() else "right"
+
+
+def arm_task(task: str, state: np.ndarray) -> str:
+    """'<left|right> arm: <task>' (the single-arm skill prompt format of the reference SmolVLA recipe)."""
+    return f"{working_arm(state)} arm: {task}"
+
+
+def load_low_dim(roots: Sequence[str], arm_prompt: bool = False) -> List[Dict]:
+    """Per episode: dir, state (T, S), action (T, A), task. Reads no images. arm_prompt: prefix the task with the
+    working arm ("left arm: pick up ...") so the language tells the policy which arm to use."""
     eps = []
     for root in roots:
         for d in episode_dirs(root):
             z = np.load(os.path.join(d, "low_dim.npz"))
             with open(os.path.join(d, "task.txt")) as fh:
                 task = fh.read().strip()
-            eps.append({"dir": d, "state": z["state"].astype(np.float32), "action": z["action"].astype(np.float32),
-                        "task": task, "root": root})
+            state = z["state"].astype(np.float32)
+            eps.append({"dir": d, "state": state, "action": z["action"].astype(np.float32),
+                        "task": arm_task(task, state) if arm_prompt else task, "root": root})
     if not eps:
         raise FileNotFoundError(f"no episodes under {list(roots)}")
     return eps

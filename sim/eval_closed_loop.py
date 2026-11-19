@@ -62,7 +62,7 @@ for ep in range(a.episodes):
     while t < a.max_steps and not ok:
         rgb, dep = sim.images()
         acts = pc.act(images={c: rgb[c] for c in info["cameras"]}, depth={c: dep[c] for c in info["depth_cameras"]},
-                      state=sim.state(), task=a.task)
+                      state=sim.state(), task=f"{s['arm']} arm: {a.task}" if info.get("arm_prompt") else a.task)
         lat.append(pc.latency_s)
         for act in acts[:n_exec]:
             sim.step(act)

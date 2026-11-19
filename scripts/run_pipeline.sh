@@ -17,6 +17,8 @@
 #   WORKERS [4] x EPS [25] = training episodes (100); VAL_WORKERS [2] x VAL_EPS [10] normal validation episodes (20);
 #   LC_VAL_EPS [5] per validation worker of low-contrast validation episodes (10, offline diagnostic only);
 #   STEPS [3000] per model, checkpoints every SAVE_EVERY [1000] (an earlier one is the fallback if validation loss turns up);
+#   EXP [normal] tag for the trained models (a new tag retrains; recordings are reused: their stages are .done);
+#   TRAIN_EXTRA [] extra train.py overrides, e.g. EXP=expert TRAIN_EXTRA="train.mode=expert model.horizon=16 model.n_action_steps=8 data.arm_prompt=true"
 #   EVAL_EPS [40] closed-loop episodes per (model, condition) [4 runs]; PORT [6040];  DRY_RUN=1 prints the plan only.
 # Seeds: train 0.. (worker w: +100000*w), validation 1,000,000.. (low-contrast validation uses the SAME layouts),
 # closed-loop eval 2,000,000.. (identical for every model and condition, so the comparisons are paired).
@@ -26,7 +28,8 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 ISAAC_ENV=${ISAAC_ENV:-defmvla-isaac}; TRAIN_ENV=${TRAIN_ENV:-defmvla}; GPU=${GPU:-1}
 WORKERS=${WORKERS:-4}; EPS=${EPS:-25}; VAL_WORKERS=${VAL_WORKERS:-2}; VAL_EPS=${VAL_EPS:-10}; LC_VAL_EPS=${LC_VAL_EPS:-5}
 STEPS=${STEPS:-3000}; SAVE_EVERY=${SAVE_EVERY:-1000}; EVAL_EPS=${EVAL_EPS:-40}; PORT=${PORT:-6040}
-EXP=normal
+EXP=${EXP:-normal}                      # tag of the trained models: runs/${EXP}_{rgb,rgbd}, results/closed_${EXP}_*; the recordings are shared
+TRAIN_EXTRA=${TRAIN_EXTRA:-}            # extra train.py overrides for both models, e.g. "train.mode=expert model.horizon=16 model.n_action_steps=8"
 CK=$(printf 'checkpoint_%06d' "$STEPS")
 P=logs/pipeline; mkdir -p "$P" logs results runs data
 
@@ -119,7 +122,7 @@ for m in ("rgb", "rgbd"):
 EOF
 }
 
-say "plan: GPU=$GPU  train=normal only, $((WORKERS * EPS)) episodes ($WORKERS workers x $EPS)  val=normal $((VAL_WORKERS * VAL_EPS)) + low_contrast $((VAL_WORKERS * LC_VAL_EPS)) (diagnostic)  steps=$STEPS (ckpt every $SAVE_EVERY)  closed-loop=$EVAL_EPS episodes x {rgb,rgbd} x {normal,low_contrast}"
+say "plan: EXP=$EXP extra=[$TRAIN_EXTRA] GPU=$GPU  train=normal only, $((WORKERS * EPS)) episodes ($WORKERS workers x $EPS)  val=normal $((VAL_WORKERS * VAL_EPS)) + low_contrast $((VAL_WORKERS * LC_VAL_EPS)) (diagnostic)  steps=$STEPS (ckpt every $SAVE_EVERY)  closed-loop=$EVAL_EPS episodes x {rgb,rgbd} x {normal,low_contrast}"
 
 # 1. record (always RGB-D). Normal training + validation; a small low-contrast VALIDATION set (never trained on)
 stage rec_normal_train        record rec_normal_train        normal_train        "$WORKERS"     "$EPS"        0       normal
@@ -132,13 +135,13 @@ SOFT=1 stage inspect_low_contrast in_env "$TRAIN_ENV" python scripts/inspect_dat
 
 # 3. train RGB-only and RGB-D on the normal data (same seed / recipe), merge, offline eval on normal validation
 stage "train_$EXP" in_env "$TRAIN_ENV" env CUDA_VISIBLE_DEVICES=$GPU bash scripts/run_experiment.sh "$EXP" \
-    "$(roots normal_train "$WORKERS")" "$(roots normal_val "$VAL_WORKERS")" "$STEPS" "train.save_every=$SAVE_EVERY"
+    "$(roots normal_train "$WORKERS")" "$(roots normal_val "$VAL_WORKERS")" "$STEPS" "train.save_every=$SAVE_EVERY" $TRAIN_EXTRA
 
 # 3b. offline action error on the low-contrast validation episodes (depth on / off for RGB-D)
-for m in rgb rgbd; do SOFT=1 stage "offline_lc_$m" offline_lc "$m"; done
+for m in rgb rgbd; do SOFT=1 stage "offline_lc_${EXP}_$m" offline_lc "$m"; done
 
 # 4. closed loop: each model under normal and low_contrast, identical seeds
-for m in rgb rgbd; do stage "closed_$m" closed_loop "$m"; done
+for m in rgb rgbd; do stage "closed_${EXP}_$m" closed_loop "$m"; done
 
 say "ALL DONE"
 [ "${DRY_RUN:-0}" = 1 ] || { summary | tee results/summary.txt; }

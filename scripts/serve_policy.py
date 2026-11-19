@@ -70,6 +70,9 @@ def self_test(r, episode_dir):
            "depth": {cam: np.asarray(Image.open(os.path.join(episode_dir, f"depth.{cam}", "000000.png")))
                      for cam in c["depth_cameras"]},
            "state": z["state"][0], "task": open(os.path.join(episode_dir, "task.txt")).read().strip()}
+    if c.get("arm_prompt"):
+        from defmvla.data import arm_task
+        req["task"] = arm_task(req["task"], z["state"])
     t0 = time.perf_counter()
     A = r.act(req)
     lat = time.perf_counter() - t0
