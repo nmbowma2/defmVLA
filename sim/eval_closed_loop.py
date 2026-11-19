@@ -27,6 +27,8 @@ ap.add_argument("--square", type=int, default=640, help="same value the training
 ap.add_argument("--task", default="pick up the cube and place it in the bowl")
 ap.add_argument("--cameras-yaml", default=None)
 ap.add_argument("--with-rail", action="store_true")
+ap.add_argument("--replan", type=int, default=0, help="execute only the first N actions of each chunk, then re-query (0 = the "
+                "checkpoint's n_action_steps). Smaller = closed-loop corrections more often; no retraining needed")
 ap.add_argument("--out", default=None, help="write the per-episode results + summary as JSON")
 a = ap.parse_args()
 
@@ -47,6 +49,8 @@ info = pc.info()
 assert info["action_dim"] == sim.state_dim, f"policy action_dim {info['action_dim']} != sim {sim.state_dim} (--with-rail?)"
 assert abs(info["fps"] - sim.fps) < 1e-6, f"policy trained at {info['fps']} fps, sim runs at {sim.fps}"
 n_exec = int(info["n_action_steps"])
+if a.replan > 0:
+    n_exec = min(n_exec, a.replan)
 print("policy:", {k: info[k] for k in ("cameras", "depth_cameras", "use_depth", "horizon", "n_action_steps", "step")}, flush=True)
 
 results = []
@@ -79,7 +83,7 @@ summary = dict(condition=a.condition, variant=a.variant, episodes=n, seed0=a.see
                success_rate=round(sum(r["success"] for r in results) / max(n, 1), 3),
                by_arm={arm: f"{sum(r['success'] for r in results if r['arm'] == arm)}/{sum(r['arm'] == arm for r in results)}"
                        for arm in ("left", "right")},
-               checkpoint=info.get("checkpoint"), use_depth=info.get("use_depth"), step=info.get("step"))
+               n_exec=n_exec, checkpoint=info.get("checkpoint"), use_depth=info.get("use_depth"), step=info.get("step"))
 print("SUMMARY", json.dumps(summary), flush=True)
 if a.out:
     os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
