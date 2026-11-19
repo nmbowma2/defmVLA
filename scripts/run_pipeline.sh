@@ -77,9 +77,19 @@ closed_loop() { # closed_loop MODEL : serve it once, roll it out under normal an
   pid=$!
   for _ in $(seq 1 180); do grep -q "listening" "$slog" 2>/dev/null && break; kill -0 "$pid" 2>/dev/null || break; sleep 5; done
   grep -q "listening" "$slog" || { echo "policy server did not start, see $slog"; kill "$pid" 2>/dev/null; return 1; }
+  # Isaac exits 0 even when it crashes at start-up (seen: "ReferenceTime annotator not registered" while creating the
+  # cameras, intermittent), so success = the result JSON exists. Up to 4 attempts per (model, condition); the episodes
+  # are seeded, so a retry reproduces exactly what the first attempt would have done.
   for cond in normal low_contrast; do
-    DUO_GPU=$GPU in_env "$ISAAC_ENV" python sim/eval_closed_loop.py --port "$PORT" --episodes "$EVAL_EPS" --seed0 2000000 \
-        --condition "$cond" --out "results/closed_${EXP}_${m}_${cond}.json" || rc=1
+    local out="results/closed_${EXP}_${m}_${cond}.json" try
+    [ -s "$out" ] && continue
+    for try in 1 2 3 4; do
+      DUO_GPU=$GPU in_env "$ISAAC_ENV" python sim/eval_closed_loop.py --port "$PORT" --episodes "$EVAL_EPS" --seed0 2000000 \
+          --condition "$cond" --out "$out"
+      [ -s "$out" ] && break
+      echo "attempt $try for $m/$cond produced no result file; retrying"; sleep 10
+    done
+    [ -s "$out" ] || rc=1
   done
   kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
   return $rc
