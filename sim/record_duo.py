@@ -2,6 +2,7 @@
 
     python sim/record_duo.py --out data/normal_train --episodes 50 --seed 0
     python sim/record_duo.py --out data/low_contrast_train --condition low_contrast --episodes 50 --seed 0
+    python sim/record_duo.py --out data/drawer_smoke --scenario open_drawer --episodes 2 --preview data/drawer_preview
 
 `python` = the Isaac Sim environment (conda or venv) with `pip install --no-deps -e <defmVLA>` done, and
 `python sim/build_usd.py` run once on this machine. See sim/duo_env.py for the state / action layout.
@@ -26,7 +27,8 @@ ap.add_argument("--variant", default="actual", choices=["actual", "upright"], he
 ap.add_argument("--condition", default="normal", choices=["normal", "low_contrast"])
 ap.add_argument("--arm", default="random", choices=["random", "left", "right"])
 ap.add_argument("--square", type=int, default=640)
-ap.add_argument("--task", default="pick up the cube and place it in the bowl")
+ap.add_argument("--scenario", default="pick_place", choices=["pick_place", "pick_place_camo", "open_drawer"])
+ap.add_argument("--task", default=None, help="language instruction (default: the scenario's, see sim/duo_env.py SCENARIOS)")
 ap.add_argument("--cameras-yaml", default=None)
 ap.add_argument("--with-rail", action="store_true", help="add the rail position as a 17th state / action entry (held at 0)")
 ap.add_argument("--grasp-z", type=float, default=0.05)
@@ -43,11 +45,13 @@ app = SimulationApp({**GPU, "headless": True, "width": 1280, "height": 720})
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import numpy as np
 from defmvla.episodes import EpisodeWriter
-from demonstrator import Demonstrator
+from demonstrator import Demonstrator, DrawerDemonstrator
 from duo_env import CAMS, DuoSim
 
-sim = DuoSim(variant=a.variant, condition=a.condition, cameras_yaml=a.cameras_yaml, with_rail=a.with_rail)
-demo = Demonstrator(sim, grasp_z=a.grasp_z, close_along=a.close_along)
+sim = DuoSim(variant=a.variant, condition=a.condition, cameras_yaml=a.cameras_yaml, with_rail=a.with_rail, scenario=a.scenario)
+a.task = a.task or sim.task
+demo = (DrawerDemonstrator(sim) if a.scenario == "open_drawer"
+        else Demonstrator(sim, grasp_z=a.grasp_z, close_along=a.close_along))
 w = EpisodeWriter(a.out, cameras=CAMS, depth_cameras=CAMS, fps=sim.fps, square=a.square)
 sim.dump_camera_json(a.out, a.square)
 log = open(os.path.join(a.out, "recording_log.jsonl"), "a")
@@ -72,10 +76,10 @@ while saved < a.episodes and tries < max_tries:
     except RuntimeError as e:                                      # IK failure: counts as a failed attempt
         print(f"attempt {tries} seed {seed}: {e}", flush=True)
         ok = False
-    p = sim.cube_pos()
-    print(f"attempt {tries} seed {seed} arm {info['arm']}: {'SUCCESS' if ok else 'fail'} steps={n[0]} "
-          f"cube_final=({p[0]:.2f},{p[1]:.2f},{p[2]:.2f})", flush=True)
-    log.write(json.dumps(dict(seed=seed, arm=info["arm"], success=ok, condition=a.condition, saved_as=saved if ok else None)) + "\n")
+    out = sim.outcome()
+    print(f"attempt {tries} seed {seed} arm {info['arm']}: {'SUCCESS' if ok else 'fail'} steps={n[0]} {out}", flush=True)
+    log.write(json.dumps(dict(seed=seed, arm=info["arm"], success=ok, scenario=a.scenario, condition=a.condition,
+                              saved_as=saved if ok else None, **out)) + "\n")
     log.flush()
     if shots:
         from PIL import Image

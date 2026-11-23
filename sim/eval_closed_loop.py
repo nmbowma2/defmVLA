@@ -24,7 +24,8 @@ ap.add_argument("--variant", default="actual", choices=["actual", "upright"])
 ap.add_argument("--condition", default="normal", choices=["normal", "low_contrast"])
 ap.add_argument("--arm", default="random", choices=["random", "left", "right"])
 ap.add_argument("--square", type=int, default=640, help="same value the training data was recorded with")
-ap.add_argument("--task", default="pick up the cube and place it in the bowl")
+ap.add_argument("--scenario", default="pick_place", choices=["pick_place", "pick_place_camo", "open_drawer"])
+ap.add_argument("--task", default=None, help="language instruction (default: the scenario's; must match the training data)")
 ap.add_argument("--cameras-yaml", default=None)
 ap.add_argument("--with-rail", action="store_true")
 ap.add_argument("--replan", type=int, default=0, help="execute only the first N actions of each chunk, then re-query (0 = the "
@@ -43,7 +44,8 @@ import numpy as np
 from defmvla.client import PolicyClient
 from duo_env import DuoSim
 
-sim = DuoSim(variant=a.variant, condition=a.condition, cameras_yaml=a.cameras_yaml, with_rail=a.with_rail)
+sim = DuoSim(variant=a.variant, condition=a.condition, cameras_yaml=a.cameras_yaml, with_rail=a.with_rail, scenario=a.scenario)
+a.task = a.task or sim.task
 pc = PolicyClient(port=a.port, host=a.host, square=a.square)
 info = pc.info()
 assert info["action_dim"] == sim.state_dim, f"policy action_dim {info['action_dim']} != sim {sim.state_dim} (--with-rail?)"
@@ -72,14 +74,13 @@ for ep in range(a.episodes):
                 break
             if t >= a.max_steps:
                 break
-    p = sim.cube_pos()
-    r = dict(seed=seed, arm=s["arm"], success=ok, steps=t, success_step=t_ok, cube_final=[round(float(v), 3) for v in p],
+    r = dict(seed=seed, arm=s["arm"], success=ok, steps=t, success_step=t_ok, **sim.outcome(),
              mean_latency_s=round(float(np.mean(lat)), 3))
     results.append(r)
     print("EPISODE", json.dumps(r), flush=True)
 
 n = len(results)
-summary = dict(condition=a.condition, variant=a.variant, episodes=n, seed0=a.seed0, successes=sum(r["success"] for r in results),
+summary = dict(scenario=a.scenario, task=a.task, condition=a.condition, variant=a.variant, episodes=n, seed0=a.seed0, successes=sum(r["success"] for r in results),
                success_rate=round(sum(r["success"] for r in results) / max(n, 1), 3),
                by_arm={arm: f"{sum(r['success'] for r in results if r['arm'] == arm)}/{sum(r['arm'] == arm for r in results)}"
                        for arm in ("left", "right")},

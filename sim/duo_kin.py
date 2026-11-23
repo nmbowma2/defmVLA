@@ -83,20 +83,25 @@ class Arm:
     def close_axis(self, q):
         return self.hand.fk(q)[:3, 1]
 
-    def solve(self, pos, q0=None, close_along="y", seed=0, restarts=30):
+    def solve(self, pos, q0=None, close_along="y", seed=0, restarts=30, approach=(0.0, 0.0, -1.0)):
         """Joint angles that put the TCP at `pos` with the approach (tcp z) pointing straight down and the finger
         closing axis horizontal along world `close_along` ('x' or 'y'), so the fingers straddle an axis-aligned
         object. Without the closing-axis term the hand yaw is left to the regulariser and varies with position.
+        approach: world direction of the TCP z axis (default straight down; (1, 0, 0) = horizontal, into +x, e.g. for a
+        drawer handle). close_along: 'x' | 'y' | 'z' or a world vector.
         Returns (q, position error in metres, closing-axis error)."""
         from scipy.optimize import least_squares
 
         q0 = np.array(DROID_HOME if q0 is None else q0, float)
-        want = np.array([1.0, 0, 0]) if close_along == "x" else np.array([0, 1.0, 0])
+        axes = {"x": [1.0, 0, 0], "y": [0, 1.0, 0], "z": [0, 0, 1.0]}
+        want = np.array(axes[close_along] if isinstance(close_along, str) else close_along, float)
+        want /= np.linalg.norm(want)
+        app = np.array(approach, float) / np.linalg.norm(approach)
 
         def res(q):
             T = self.tcp.fk(q)
             e_pos = (T[:3, 3] - pos) * 20
-            e_dir = (T[:3, 2] - np.array([0, 0, -1.0])) * 5
+            e_dir = (T[:3, 2] - app) * 5
             c = self.close_axis(q)
             e_close = (1.0 - abs(float(np.dot(c, want)))) * 5      # 0 when the closing axis is +-want
             return np.concatenate([e_pos, e_dir, [e_close], (q - q0) * 0.02])

@@ -7,18 +7,20 @@
 #
 #   export OMNI_KIT_ACCEPT_EULA=YES                 # your decision: the Omniverse EULA (the script refuses to start without it)
 #   tmux new -s pipe                                # then inside tmux (detach: Ctrl-b d, reattach: tmux attach -t pipe)
-#   bash scripts/run_pipeline.sh 2>&1 | tee -a logs/pipeline.log
+#   SCENARIO=open_drawer bash scripts/run_pipeline.sh 2>&1 | tee -a logs/pipeline.log
 #   (without tmux:  bash scripts/run_detached.sh pipeline bash scripts/run_pipeline.sh   -- uses the defaults below)
 #
 # What is trained: ONLY normal-condition data. The low_contrast recordings are a small VALIDATION set (offline diagnostic);
 # they never enter training. Low contrast is tested zero-shot in closed loop.
 # Settings (environment variables; defaults in brackets):
+#   SCENARIO (required) pick_place | pick_place_camo | open_drawer; data/${SCENARIO}_*, EXP defaults to it
 #   ISAAC_ENV [defmvla-isaac]  TRAIN_ENV [defmvla]  GPU [1: the physical GPU for Isaac AND training]
 #   WORKERS [4] x EPS [25] = training episodes (100); VAL_WORKERS [2] x VAL_EPS [10] normal validation episodes (20);
 #   LC_VAL_EPS [5] per validation worker of low-contrast validation episodes (10, offline diagnostic only);
-#   STEPS [3000] per model, checkpoints every SAVE_EVERY [1000] (an earlier one is the fallback if validation loss turns up);
-#   EXP [normal] tag for the trained models (a new tag retrains; recordings are reused: their stages are .done);
-#   TRAIN_EXTRA [] extra train.py overrides, e.g. EXP=expert TRAIN_EXTRA="train.mode=expert model.horizon=16 model.n_action_steps=8 data.arm_prompt=true"
+#   STEPS [8000] per model, checkpoints every SAVE_EVERY [2000] (an earlier one is the fallback if validation loss turns up);
+#   EXP [$SCENARIO] tag for the trained models (a new tag retrains; recordings are reused: their stages are .done);
+#   TRAIN_EXTRA [train.mode=expert model.horizon=16 model.n_action_steps=8 data.arm_prompt=true] train.py overrides for both
+#     models (TRAIN_EXTRA="" = the plain configs/train_*.yaml recipe)
 #   EVAL_EPS [40] closed-loop episodes per (model, condition) [4 runs]; PORT [6040];  DRY_RUN=1 prints the plan only.
 # Seeds: train 0.. (worker w: +100000*w), validation 1,000,000.. (low-contrast validation uses the SAME layouts),
 # closed-loop eval 2,000,000.. (identical for every model and condition, so the comparisons are paired).
@@ -27,9 +29,14 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 ISAAC_ENV=${ISAAC_ENV:-defmvla-isaac}; TRAIN_ENV=${TRAIN_ENV:-defmvla}; GPU=${GPU:-1}
 WORKERS=${WORKERS:-4}; EPS=${EPS:-25}; VAL_WORKERS=${VAL_WORKERS:-2}; VAL_EPS=${VAL_EPS:-10}; LC_VAL_EPS=${LC_VAL_EPS:-5}
-STEPS=${STEPS:-3000}; SAVE_EVERY=${SAVE_EVERY:-1000}; EVAL_EPS=${EVAL_EPS:-40}; PORT=${PORT:-6040}
-EXP=${EXP:-normal}                      # tag of the trained models: runs/${EXP}_{rgb,rgbd}, results/closed_${EXP}_*; the recordings are shared
-TRAIN_EXTRA=${TRAIN_EXTRA:-}            # extra train.py overrides for both models, e.g. "train.mode=expert model.horizon=16 model.n_action_steps=8"
+STEPS=${STEPS:-8000}; SAVE_EVERY=${SAVE_EVERY:-2000}; EVAL_EPS=${EVAL_EPS:-40}; PORT=${PORT:-6040}
+SCENARIO=${SCENARIO:-}                  # REQUIRED: pick_place | pick_place_camo | open_drawer (sim/duo_env.py)
+EXP=${EXP:-$SCENARIO}                   # tag of the trained models: runs/${EXP}_{rgb,rgbd}, results/closed_${EXP}_*
+# The recipe that reached 68-72 % on pick_place (entry-VLA's): whole action expert, 16-step chunks, 8 executed, arm prompt
+TRAIN_EXTRA=${TRAIN_EXTRA-train.mode=expert model.horizon=16 model.n_action_steps=8 data.arm_prompt=true}
+case "$SCENARIO" in pick_place|pick_place_camo|open_drawer) ;;
+  *) echo "set SCENARIO=pick_place|pick_place_camo|open_drawer (got '$SCENARIO')"; exit 2 ;; esac
+D=$SCENARIO                             # data prefix: data/${SCENARIO}_{normal_train,normal_val,low_contrast_val}_w*
 CK=$(printf 'checkpoint_%06d' "$STEPS")
 P=logs/pipeline; mkdir -p "$P" logs results runs data
 
@@ -62,12 +69,12 @@ record() { # record STAGE OUT WORKERS EPISODES SEED0 CONDITION
   local d; for d in "data/$2"_w*; do
     [ -e "$d" ] && { echo "$d already exists but stage $1 is not marked done: remove it or 'touch $P/$1.done'"; return 1; }
   done
-  DUO_GPU=$GPU in_env "$ISAAC_ENV" bash sim/collect_parallel.sh "data/$2" "$3" "$4" "$5" --condition "$6"
+  DUO_GPU=$GPU in_env "$ISAAC_ENV" bash sim/collect_parallel.sh "data/$2" "$3" "$4" "$5" --condition "$6" --scenario "$SCENARIO"
 }
 
 offline_lc() { # offline_lc MODEL : action error on the low-contrast validation episodes (never trained on)
   local m=$1 args=() w
-  for ((w = 0; w < VAL_WORKERS; w++)); do args+=("lc$w=data/low_contrast_val_w$w"); done
+  for ((w = 0; w < VAL_WORKERS; w++)); do args+=("lc$w=data/${D}_low_contrast_val_w$w"); done
   in_env "$TRAIN_ENV" env HF_HUB_OFFLINE=1 CUDA_VISIBLE_DEVICES=$GPU python scripts/eval_offline.py \
       --checkpoint "runs/${EXP}_$m/$CK" --roots "${args[@]}" --out "results/${EXP}_offline_lowcontrast_$m.json"
 }
@@ -87,7 +94,7 @@ closed_loop() { # closed_loop MODEL : serve it once, roll it out under normal an
     local out="results/closed_${EXP}_${m}_${cond}.json" try
     [ -s "$out" ] && continue
     for try in 1 2 3 4; do
-      DUO_GPU=$GPU in_env "$ISAAC_ENV" python sim/eval_closed_loop.py --port "$PORT" --episodes "$EVAL_EPS" --seed0 2000000 \
+      DUO_GPU=$GPU in_env "$ISAAC_ENV" python sim/eval_closed_loop.py --scenario "$SCENARIO" --port "$PORT" --episodes "$EVAL_EPS" --seed0 2000000 \
           --condition "$cond" --out "$out"
       [ -s "$out" ] && break
       echo "attempt $try for $m/$cond produced no result file; retrying"; sleep 10
@@ -122,20 +129,20 @@ for m in ("rgb", "rgbd"):
 EOF
 }
 
-say "plan: EXP=$EXP extra=[$TRAIN_EXTRA] GPU=$GPU  train=normal only, $((WORKERS * EPS)) episodes ($WORKERS workers x $EPS)  val=normal $((VAL_WORKERS * VAL_EPS)) + low_contrast $((VAL_WORKERS * LC_VAL_EPS)) (diagnostic)  steps=$STEPS (ckpt every $SAVE_EVERY)  closed-loop=$EVAL_EPS episodes x {rgb,rgbd} x {normal,low_contrast}"
+say "plan: SCENARIO=$SCENARIO EXP=$EXP extra=[$TRAIN_EXTRA] GPU=$GPU  train=normal only, $((WORKERS * EPS)) episodes ($WORKERS workers x $EPS)  val=normal $((VAL_WORKERS * VAL_EPS)) + low_contrast $((VAL_WORKERS * LC_VAL_EPS)) (diagnostic)  steps=$STEPS (ckpt every $SAVE_EVERY)  closed-loop=$EVAL_EPS episodes x {rgb,rgbd} x {normal,low_contrast}"
 
 # 1. record (always RGB-D). Normal training + validation; a small low-contrast VALIDATION set (never trained on)
-stage rec_normal_train        record rec_normal_train        normal_train        "$WORKERS"     "$EPS"        0       normal
-stage rec_normal_val          record rec_normal_val          normal_val          "$VAL_WORKERS" "$VAL_EPS"    1000000 normal
-stage rec_low_contrast_val    record rec_low_contrast_val    low_contrast_val    "$VAL_WORKERS" "$LC_VAL_EPS" 1000000 low_contrast
+stage "rec_${D}_normal_train"     record "rec_${D}_normal_train"     "${D}_normal_train"     "$WORKERS"     "$EPS"        0       normal
+stage "rec_${D}_normal_val"       record "rec_${D}_normal_val"       "${D}_normal_val"       "$VAL_WORKERS" "$VAL_EPS"    1000000 normal
+stage "rec_${D}_low_contrast_val" record "rec_${D}_low_contrast_val" "${D}_low_contrast_val" "$VAL_WORKERS" "$LC_VAL_EPS" 1000000 low_contrast
 
 # 2. look-at-the-data artefacts (never fatal)
-SOFT=1 stage inspect_normal       in_env "$TRAIN_ENV" python scripts/inspect_data.py --root data/normal_train_w0       --out runs/inspect_normal.png
-SOFT=1 stage inspect_low_contrast in_env "$TRAIN_ENV" python scripts/inspect_data.py --root data/low_contrast_val_w0   --out runs/inspect_low_contrast.png
+SOFT=1 stage "inspect_${D}_normal"       in_env "$TRAIN_ENV" python scripts/inspect_data.py --root "data/${D}_normal_train_w0"     --out "runs/inspect_${D}_normal.png"
+SOFT=1 stage "inspect_${D}_low_contrast" in_env "$TRAIN_ENV" python scripts/inspect_data.py --root "data/${D}_low_contrast_val_w0" --out "runs/inspect_${D}_low_contrast.png"
 
 # 3. train RGB-only and RGB-D on the normal data (same seed / recipe), merge, offline eval on normal validation
 stage "train_$EXP" in_env "$TRAIN_ENV" env CUDA_VISIBLE_DEVICES=$GPU bash scripts/run_experiment.sh "$EXP" \
-    "$(roots normal_train "$WORKERS")" "$(roots normal_val "$VAL_WORKERS")" "$STEPS" "train.save_every=$SAVE_EVERY" $TRAIN_EXTRA
+    "$(roots "${D}_normal_train" "$WORKERS")" "$(roots "${D}_normal_val" "$VAL_WORKERS")" "$STEPS" "train.save_every=$SAVE_EVERY" $TRAIN_EXTRA
 
 # 3b. offline action error on the low-contrast validation episodes (depth on / off for RGB-D)
 for m in rgb rgbd; do SOFT=1 stage "offline_lc_${EXP}_$m" offline_lc "$m"; done
