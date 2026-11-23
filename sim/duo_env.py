@@ -22,7 +22,7 @@ from isaacsim.core.prims import SingleArticulation
 from isaacsim.core.utils.stage import add_reference_to_stage, get_current_stage
 from isaacsim.core.utils.types import ArticulationAction
 from isaacsim.sensors.camera import Camera
-from pxr import Gf, UsdGeom, UsdLux
+from pxr import Gf, Sdf, UsdGeom, UsdLux, UsdShade
 
 from duo_kin import Arm, Chain, urdf_path
 
@@ -71,6 +71,39 @@ def _add_camera(stage, path, M):
     return path
 
 
+SOFT_FINGER_RGB = (0.80, 0.05, 0.05)   # the real soft fingers are red; the URDF importer drops the URDF colour
+
+
+def _paint_soft_fingers(stage, root):
+    """Bind a red material to every soft-finger mesh under root (matched by link or mesh name, since fixed joints
+    are merged at import). Returns the number of prims painted; prints a warning when none matched."""
+    mat = UsdShade.Material.Define(stage, "/World/Looks/soft_finger_red")
+    sh = UsdShade.Shader.Define(stage, "/World/Looks/soft_finger_red/shader")
+    sh.CreateIdAttr("UsdPreviewSurface")
+    sh.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(*SOFT_FINGER_RGB))
+    sh.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.6)
+    mat.CreateSurfaceOutput().ConnectToSource(sh.ConnectableAPI(), "surface")
+    # Bind on the first matching prim of each branch (link, visual or mesh). Instanceable visuals cannot be edited
+    # inside, but a binding on the instance prim (strongerThanDescendants) reaches its meshes.
+    painted = []
+    for p in stage.Traverse():
+        path = str(p.GetPath())
+        low = path.lower()
+        if not low.startswith(root.lower()) or not ("soft_finger" in low or "mount_gripper" in low):
+            continue
+        if any(path.startswith(q + "/") for q in painted):
+            continue
+        UsdShade.MaterialBindingAPI.Apply(p).Bind(mat, UsdShade.Tokens.strongerThanDescendants)
+        if p.IsA(UsdGeom.Gprim):
+            UsdGeom.Gprim(p).CreateDisplayColorAttr([Gf.Vec3f(*SOFT_FINGER_RGB)])
+        painted.append(path)
+    if painted:
+        print(f"soft fingers painted red: {len(painted)} prims, e.g. {painted[:2]}", flush=True)
+    else:
+        print("WARNING: no soft-finger prims found to paint red", flush=True)
+    return len(painted)
+
+
 class DuoSim:
     def __init__(self, variant="actual", condition="normal", cameras_yaml=None, with_rail=False):
         self.variant, self.condition, self.with_rail = variant, condition, with_rail
@@ -101,6 +134,7 @@ class DuoSim:
         add_reference_to_stage(usd_path(variant), "/World/duo")
         prim = stage.GetPrimAtPath("/World/duo")
         prim.GetVariantSets().GetVariantSet("Physics").SetVariantSelection("physx")
+        self.red_fingers = _paint_soft_fingers(stage, "/World/duo")
         self.robot = self.world.scene.add(SingleArticulation(prim_path="/World/duo/Geometry/rail_link", name="duo"))
         # cameras
         w, f = self.cfg["wrist"], self.cfg["front"]

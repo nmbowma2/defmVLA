@@ -15,4 +15,5 @@ install.log
 logs/
 sim/robot/usd/
 results/
+videos/
 .venv-isaac/
