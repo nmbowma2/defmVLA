@@ -191,3 +191,76 @@ def test_save_load_merge_round_trip(policy, pre, tmp_path):
     loaded.merge_lora()
     assert loaded.config.lora_r == 0 and not any("lora_" in n for n, _ in loaded.named_parameters())
     assert torch.allclose(chunk(loaded, b2), before, atol=1e-4)
+
+
+# ------------------------------------------------------------------ backbone LoRA + connector
+@pytest.fixture(scope="module", params=[8, 16])
+def vlm_policy(request):
+    return build(vlm_lora_r=8, vlm_lora_dropout=0.5, vlm_lora_layers=request.param, train_connector=True)
+
+
+VLM = "model.vlm_with_expert.vlm.model."
+
+
+def test_vlm_lora_starts_as_the_policy_without_it(vlm_policy, pre):
+    b = preprocess(pre, raw_batch(), DEV)
+    ref = build(vlm_float32=True, connector_float32=True, vlm_lora_layers=vlm_policy.config.vlm_lora_layers)  # same precision, no adapters (bf16 differs by rounding)
+    assert ref.config.vlm_lora_r == 0
+    vlm_policy.eval()
+    assert torch.allclose(chunk(vlm_policy, b), chunk(ref.eval(), b), atol=1e-5)  # zero gate, zero adapters
+
+
+def test_vlm_lora_and_connector_train_and_nothing_else_of_the_vlm(vlm_policy, pre):
+    p = vlm_policy
+    counts = p.configure_trainable("expert", True, train_connector=True)
+    assert counts["vlm_trainable"] > 0 and counts["connector_frozen"] == 0 and counts["connector_trainable"] > 0
+    p.train()
+    drops = [m for n, m in p.text_model.named_modules() if n.endswith("lora_dropout.default")]
+    assert drops and all(d.training for d in drops)  # lerobot's vlm.eval() must not switch them off
+    assert not p.model.depth_encoder.model.training
+    p.model.depth_fusion.gate.data.fill_(0.1)
+    try:
+        loss, _ = p.forward(preprocess(pre, raw_batch(), DEV))
+        loss.backward()
+        named = dict(p.named_parameters())
+        got = {n for n, q in named.items() if q.grad is not None and q.grad.abs().sum() > 0}
+        # B starts at zero, so the first gradient reaches lora_B only; every adapter must get one (no dead adapters)
+        adapters = {n for n in named if n.startswith(VLM + "text_model") and "lora_B" in n}
+        assert adapters and adapters <= got
+        assert {int(n.split(".layers.")[1].split(".")[0]) for n in adapters} == set(range(16 - p.config.vlm_lora_layers, 16))
+        assert any(n.startswith(VLM + "connector") for n in got) and "model.depth_fusion.gate" in got
+        assert all(n.startswith(VLM + "connector") or "lora_" in n for n in got if n.startswith(VLM))
+        assert p.depth_ratio() > 0
+        groups = {g["name"]: g for g in p.param_groups(1e-4, 4.0, 0.5)}
+        assert groups["vlm"]["lr"] == pytest.approx(5e-5)
+        assert sum(len(g["params"]) for g in groups.values()) == sum(q.requires_grad for q in p.parameters())
+    finally:
+        p.zero_grad(set_to_none=True)
+        p.model.depth_fusion.gate.data.zero_()
+        p.eval()
+
+
+def test_vlm_lora_save_load_merge_reload(vlm_policy, pre, tmp_path):
+    from defmvla.policy import load_policy
+    from defmvla.runtime import save_checkpoint
+
+    p = vlm_policy
+    torch.manual_seed(0)
+    for n, q in p.named_parameters():
+        if "lora_B" in n:
+            q.data.normal_(0, 0.02)
+        elif n.startswith(VLM + "connector"):
+            q.data += 1e-4 * torch.randn_like(q)  # too small for bf16 to keep exactly
+    b = preprocess(pre, raw_batch(), DEV)
+    before = chunk(p, b)
+    ck, dep = str(tmp_path / "ck"), str(tmp_path / "dep")
+    save_checkpoint(ck, p, *make_processors(p.config, STATS), {})
+    loaded = load_policy(ck, DEV)
+    assert loaded.config.vlm_lora_r == 8 and torch.allclose(chunk(loaded, b), before, atol=1e-4)
+    loaded.merge_lora()
+    assert loaded.config.vlm_lora_r == 0 and not any("lora_" in n for n, _ in loaded.named_parameters())
+    merged = chunk(loaded, b)
+    loaded.save_pretrained(dep)  # what merge_for_deploy.py does; the reload is what gets deployed
+    del loaded
+    again = chunk(load_policy(dep, DEV), b)
+    assert torch.allclose(again, merged, atol=1e-5) and torch.allclose(merged, before, atol=5e-3)

@@ -8,6 +8,8 @@
 #
 # ROOTS are comma-separated directories. Output: runs/TAG_rgb, runs/TAG_rgbd (checkpoints + `_deploy` merges),
 # results/TAG_offline_{rgb,rgbd}.json, logs/TAG_*.log, and logs/TAG.done when everything finished.
+# Which checkpoint is merged and evaluated: CK_RULE=last [default] | best (lowest validation loss among the saved ones; set
+# train.save_every to a multiple of train.val_every). The choice is written to runs/TAG_*/selected_checkpoint.txt.
 # Run it detached for long jobs:  bash scripts/run_detached.sh TAG bash scripts/run_experiment.sh TAG ...
 # Env: DEFMVLA_PYTHON (default: python), CUDA_VISIBLE_DEVICES, HF_HUB_OFFLINE=1 is set for you (weights must be cached).
 set -euo pipefail
@@ -16,14 +18,17 @@ PY=${DEFMVLA_PYTHON:-python}
 export HF_HUB_OFFLINE=1
 mkdir -p logs results
 rm -f "logs/$TAG.done"
-CK=$(printf 'checkpoint_%06d' "$STEPS")
+CK_RULE=${CK_RULE:-last}
 for m in rgb rgbd; do
   "$PY" scripts/train.py --config "configs/train_$m.yaml" "data.train_roots=[$TRAIN]" "data.val_roots=[$VAL]" \
       "train.steps=$STEPS" "train.save_every=$STEPS" "train.run_dir=runs/${TAG}_$m" "$@" > "logs/${TAG}_train_$m.log" 2>&1
+  CK=$("$PY" scripts/pick_checkpoint.py "runs/${TAG}_$m" --rule "$CK_RULE")
+  echo "$CK" > "runs/${TAG}_$m/selected_checkpoint.txt"
   "$PY" scripts/merge_for_deploy.py --checkpoint "runs/${TAG}_$m/$CK" > "logs/${TAG}_merge_$m.log" 2>&1
 done
 ROOTS=(); i=0; IFS=',' read -ra VR <<< "$VAL"; for r in "${VR[@]}"; do ROOTS+=("val$i=$r"); i=$((i+1)); done
 for m in rgb rgbd; do
+  CK=$(cat "runs/${TAG}_$m/selected_checkpoint.txt")
   "$PY" scripts/eval_offline.py --checkpoint "runs/${TAG}_$m/$CK" --roots "${ROOTS[@]}" --out "results/${TAG}_offline_$m.json" \
       > "logs/${TAG}_eval_$m.log" 2>&1
 done

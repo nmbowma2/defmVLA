@@ -7,37 +7,41 @@
 #
 #   export OMNI_KIT_ACCEPT_EULA=YES                 # your decision: the Omniverse EULA (the script refuses to start without it)
 #   tmux new -s pipe                                # then inside tmux (detach: Ctrl-b d, reattach: tmux attach -t pipe)
-#   SCENARIO=open_drawer bash scripts/run_pipeline.sh 2>&1 | tee -a logs/pipeline.log
-#   (without tmux:  bash scripts/run_detached.sh pipeline bash scripts/run_pipeline.sh   -- uses the defaults below)
+#   GPU=<n> SCENARIO=open_drawer bash scripts/run_pipeline.sh 2>&1 | tee -a logs/pipeline.log
+#   (without tmux:  GPU=<n> SCENARIO=... bash scripts/run_detached.sh pipeline bash scripts/run_pipeline.sh)
 #
 # What is trained: ONLY normal-condition data. The low_contrast recordings are a small VALIDATION set (offline diagnostic);
 # they never enter training. Low contrast is tested zero-shot in closed loop.
 # Settings (environment variables; defaults in brackets):
-#   SCENARIO (required) pick_place | pick_place_camo | open_drawer; data/${SCENARIO}_*, EXP defaults to it
-#   ISAAC_ENV [defmvla-isaac]  TRAIN_ENV [defmvla]  GPU [1: the physical GPU for Isaac AND training]
+#   SCENARIO (required) pick_place | pick_place_camo | open_drawer; recordings in data/${SCENARIO}_*
+#   GPU (required) the physical GPU for Isaac AND training;  ISAAC_ENV [defmvla-isaac]  TRAIN_ENV [defmvla]
 #   WORKERS [4] x EPS [25] = training episodes (100); VAL_WORKERS [2] x VAL_EPS [10] normal validation episodes (20);
 #   LC_VAL_EPS [5] per validation worker of low-contrast validation episodes (10, offline diagnostic only);
-#   STEPS [8000] per model, checkpoints every SAVE_EVERY [2000] (an earlier one is the fallback if validation loss turns up);
-#   EXP [$SCENARIO] tag for the trained models (a new tag retrains; recordings are reused: their stages are .done);
-#   TRAIN_EXTRA [train.mode=expert model.horizon=16 model.n_action_steps=8 data.arm_prompt=true] train.py overrides for both
-#     models (TRAIN_EXTRA="" = the plain configs/train_*.yaml recipe)
+#   STEPS [10000] per model, checkpoints every SAVE_EVERY [2000]; CK_RULE [best] evaluate the saved checkpoint with the
+#     lowest NORMAL validation loss (last = the final one);
+#   EXP [${SCENARIO}_vlmlora] tag for the trained models (a new tag retrains; recordings are reused: their stages are .done);
+#   TRAIN_EXTRA [see below] train.py overrides, the same for the RGB and the RGB-D model
+#     (TRAIN_EXTRA="" = the plain configs/train_*.yaml recipe)
 #   EVAL_EPS [40] closed-loop episodes per (model, condition) [4 runs]; PORT [6040];  DRY_RUN=1 prints the plan only.
 # Seeds: train 0.. (worker w: +100000*w), validation 1,000,000.. (low-contrast validation uses the SAME layouts),
 # closed-loop eval 2,000,000.. (identical for every model and condition, so the comparisons are paired).
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-ISAAC_ENV=${ISAAC_ENV:-defmvla-isaac}; TRAIN_ENV=${TRAIN_ENV:-defmvla}; GPU=${GPU:-1}
+ISAAC_ENV=${ISAAC_ENV:-defmvla-isaac}; TRAIN_ENV=${TRAIN_ENV:-defmvla}; GPU=${GPU:-}
 WORKERS=${WORKERS:-4}; EPS=${EPS:-25}; VAL_WORKERS=${VAL_WORKERS:-2}; VAL_EPS=${VAL_EPS:-10}; LC_VAL_EPS=${LC_VAL_EPS:-5}
-STEPS=${STEPS:-8000}; SAVE_EVERY=${SAVE_EVERY:-2000}; EVAL_EPS=${EVAL_EPS:-40}; PORT=${PORT:-6040}
+STEPS=${STEPS:-10000}; SAVE_EVERY=${SAVE_EVERY:-2000}; EVAL_EPS=${EVAL_EPS:-40}; PORT=${PORT:-6040}
 SCENARIO=${SCENARIO:-}                  # REQUIRED: pick_place | pick_place_camo | open_drawer (sim/duo_env.py)
-EXP=${EXP:-$SCENARIO}                   # tag of the trained models: runs/${EXP}_{rgb,rgbd}, results/closed_${EXP}_*
-# The recipe that reached 68-72 % on pick_place (entry-VLA's): whole action expert, 16-step chunks, 8 executed, arm prompt
-TRAIN_EXTRA=${TRAIN_EXTRA-train.mode=expert model.horizon=16 model.n_action_steps=8 data.arm_prompt=true}
+EXP=${EXP:-${SCENARIO}_vlmlora}         # tag of the trained models: runs/${EXP}_{rgb,rgbd}, results/closed_${EXP}_*
+export CK_RULE=${CK_RULE:-best}
+# entry-VLA's recipe (whole action expert, 16-step chunks, 8 executed, arm prompt) + backbone adaptation: the connector
+# (image projector) trains fully, rank-16 LoRA on the attention of all 16 VLM layers (depth joins before the first one), both at half the lr
+TRAIN_EXTRA=${TRAIN_EXTRA-train.mode=expert model.horizon=16 model.n_action_steps=8 data.arm_prompt=true model.vlm_lora_r=16 model.vlm_lora_layers=16 model.vlm_lora_dropout=0.05 train.train_connector=true train.vlm_lr_mult=0.5 train.val_every=1000 train.val_batches=64}
 case "$SCENARIO" in pick_place|pick_place_camo|open_drawer) ;;
   *) echo "set SCENARIO=pick_place|pick_place_camo|open_drawer (got '$SCENARIO')"; exit 2 ;; esac
 D=$SCENARIO                             # data prefix: data/${SCENARIO}_{normal_train,normal_val,low_contrast_val}_w*
-CK=$(printf 'checkpoint_%06d' "$STEPS")
+[[ "$GPU" =~ ^[0-9]+$ ]] || { echo "set GPU=<number> (nvidia-smi shows which one is free)"; exit 2; }
+selected() { cat "runs/${EXP}_$1/selected_checkpoint.txt"; }   # written by run_experiment.sh
 P=logs/pipeline; mkdir -p "$P" logs results runs data
 
 say() { echo "[$(date '+%F %T')] $*" | tee -a "$P/progress.log"; }
@@ -76,11 +80,11 @@ offline_lc() { # offline_lc MODEL : action error on the low-contrast validation 
   local m=$1 args=() w
   for ((w = 0; w < VAL_WORKERS; w++)); do args+=("lc$w=data/${D}_low_contrast_val_w$w"); done
   in_env "$TRAIN_ENV" env HF_HUB_OFFLINE=1 CUDA_VISIBLE_DEVICES=$GPU python scripts/eval_offline.py \
-      --checkpoint "runs/${EXP}_$m/$CK" --roots "${args[@]}" --out "results/${EXP}_offline_lowcontrast_$m.json"
+      --checkpoint "runs/${EXP}_$m/$(selected "$m")" --roots "${args[@]}" --out "results/${EXP}_offline_lowcontrast_$m.json"
 }
 
 closed_loop() { # closed_loop MODEL : serve it once, roll it out under normal and low_contrast with the same seeds
-  local m=$1 ck="runs/${EXP}_${1}/${CK}_deploy" slog="logs/serve_${EXP}_${1}.log" pid cond rc=0
+  local m=$1 ck="runs/${EXP}_${1}/$(selected "$1")_deploy" slog="logs/serve_${EXP}_${1}.log" pid cond rc=0
   [ -d "$ck" ] || { echo "missing $ck"; return 1; }
   ( conda activate "$TRAIN_ENV" && exec env HF_HUB_OFFLINE=1 CUDA_VISIBLE_DEVICES=$GPU python scripts/serve_policy.py \
       --checkpoint "$ck" --port "$PORT" ) > "$slog" 2>&1 &
@@ -126,6 +130,19 @@ for m in ("rgb", "rgbd"):
         s = r["summary"]; lo, hi = wilson(s["successes"], s["episodes"])
         tag = "zero-shot" if c == "low_contrast" else ""
         print(f"{m:32s} {c:14s} {s['successes']:>4d}/{s['episodes']:<4d} {s['success_rate']:>6.2f}  [{lo:.2f}, {hi:.2f}]  {s['by_arm']} {tag}")
+print("\nDoes the RGB-D model use depth? Action error on held-out demos with depth on / off (same weights; off should be worse)")
+for c, f in (("normal", f"results/{exp}_offline_rgbd.json"), ("low_contrast", f"results/{exp}_offline_lowcontrast_rgbd.json")):
+    if not os.path.exists(f): print(f"{c:14s}   missing"); continue
+    sp = list(json.load(open(f))["splits"].values()); n = sum(s["chunks"] for s in sp)
+    on, off = (sum(s[k] * s["chunks"] for s in sp) / n for k in ("mae_depth", "mae_no_depth"))
+    print(f"{c:14s} on {on:.5f}  off {off:.5f}  off vs on {100 * (off / on - 1):+.1f} %")
+f = f"runs/{exp}_rgbd/train_log.jsonl"
+if os.path.exists(f):
+    r = [json.loads(x) for x in open(f) if x.strip()][-1]
+    print(f"end of training: depth_gate {r['depth_gate']}  depth signal / RGB token size {r.get('depth_ratio', 'not logged')}")
+for m in ("rgb", "rgbd"):
+    f = f"runs/{exp}_{m}/selected_checkpoint.txt"
+    if os.path.exists(f): print(f"evaluated checkpoint {m}: {open(f).read().strip()}")
 EOF
 }
 
@@ -151,4 +168,4 @@ for m in rgb rgbd; do SOFT=1 stage "offline_lc_${EXP}_$m" offline_lc "$m"; done
 for m in rgb rgbd; do stage "closed_${EXP}_$m" closed_loop "$m"; done
 
 say "ALL DONE"
-[ "${DRY_RUN:-0}" = 1 ] || { summary | tee results/summary.txt; }
+[ "${DRY_RUN:-0}" = 1 ] || { summary | tee "results/summary_$EXP.txt" results/summary.txt; }

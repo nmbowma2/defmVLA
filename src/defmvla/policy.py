@@ -14,9 +14,10 @@ prefix embeddings.
 
 Trainable / frozen
 ------------------
-frozen:     SigLIP, connector, VLM text layers, DeFM
+frozen:     SigLIP, DeFM, the early VLM text layers (and, unless switched on, everything else of the VLM)
 trainable:  DepthFusion (MLP + gate), the action expert (LoRA adapters or all of it), optionally the small
-            state / action / time projections
+            state / action / time projections, optionally the connector (image projector, all of it) and LoRA
+            adapters on the attention of the last `vlm_lora_layers` VLM text layers
 With the gate at its initial 0 the policy is numerically the RGB policy.
 """
 
@@ -71,6 +72,18 @@ class DepthSmolVLAConfig(SmolVLAConfig):
     # Under autocast the forward pass still runs in bf16. The frozen VLM stays bfloat16.
     expert_float32: bool = True
 
+    # --- LoRA on the VLM backbone: attention of the last `vlm_lora_layers` text layers (0 = no adapters) ---
+    # The depth residual joins after SigLIP and the connector, so only the text layers process fused tokens.
+    vlm_lora_r: int = 0
+    vlm_lora_alpha: int = 32
+    vlm_lora_dropout: float = 0.0
+    vlm_lora_layers: int = 8
+    vlm_lora_targets: list[str] = field(default_factory=lambda: ["q_proj", "k_proj", "v_proj", "o_proj"])
+    # Same reason as expert_float32. Both stay true after merging: a checkpoint must be rebuilt in the precision
+    # its weights were saved in, or the merged / trained weights would be rounded to bf16 on load.
+    vlm_float32: bool = False  # the VLM layers that carry (or carried) adapters
+    connector_float32: bool = False  # the connector, when it is (or was) trained
+
     def __post_init__(self):
         super().__post_init__()
         if self.depth_pool not in ("unshuffle", "avg"):
@@ -88,6 +101,7 @@ class DepthSmolVLAPolicy(SmolVLAPolicy):
         m = self.model
         m._depth_res = None  # per-forward list of residuals, aligned with the image list
         m._depth_i = 0
+        m._depth_ratio = None
         if config.use_depth:
             unknown = set(config.depth_map) - set(config.image_features)
             if not config.depth_map or unknown:
@@ -101,8 +115,26 @@ class DepthSmolVLAPolicy(SmolVLAPolicy):
             self._install_prefix_hook()
         if config.expert_float32:
             self.expert.float()
+        if config.vlm_float32:
+            for layer in {i for i, _ in self._vlm_lora_sites()}:
+                self.text_model.layers[layer].float()  # whole layer, so it also runs without autocast
+        if config.connector_float32:
+            connector = m.vlm_with_expert.get_vlm_model().connector
+            connector.float()  # SigLIP hands over bf16; without autocast the dtypes would not match
+            connector.register_forward_pre_hook(lambda _m, args: (args[0].float(),))
         if config.lora_r > 0:
             self._inject_lora()
+        if config.vlm_lora_r > 0:
+            self._inject_vlm_lora()
+
+    def train(self, mode: bool = True):
+        """lerobot puts the whole VLM in eval mode when train_expert_only is set, which would silently switch off
+        the dropout of the VLM adapters."""
+        super().train(mode)
+        for n, mod in self.text_model.named_modules():
+            if n.endswith("lora_dropout.default"):
+                mod.train(mode)
+        return self
 
     # ------------------------------------------------------------------ token-count bookkeeping
     def image_token_grid(self) -> int:
@@ -148,7 +180,7 @@ class DepthSmolVLAPolicy(SmolVLAPolicy):
             if len(res) > len(images) or length < len(images) * block:
                 raise RuntimeError(f"prefix of {length} tokens cannot hold {len(images)} images of {block} tokens: "
                                    "the depth hook is out of sync with this lerobot version")
-            add = None
+            add, ratios = None, []
             for i, r in enumerate(res):
                 if r is None:
                     continue
@@ -159,6 +191,13 @@ class DepthSmolVLAPolicy(SmolVLAPolicy):
                     add = torch.zeros(embs.shape, dtype=torch.float32, device=embs.device)
                 start = i * block + lead
                 add[:, start:start + n] = r.float() * dim**0.5
+                with torch.no_grad():  # size of the depth signal relative to the RGB tokens it is added to
+                    size = add[:, start:start + n].norm(dim=-1).mean(1)
+                    kept = r.detach().flatten(1).any(1)  # samples whose depth was not dropped
+                    rel = size / embs[:, start:start + n].float().norm(dim=-1).mean(1)
+                    ratios.append((rel * kept).sum() / kept.sum().clamp(min=1))
+            if ratios:
+                m._depth_ratio = torch.stack(ratios).mean()
             if add is not None:
                 embs = embs.float() + add
             return embs, pad_masks, att_masks
@@ -236,6 +275,40 @@ class DepthSmolVLAPolicy(SmolVLAPolicy):
         inject_adapter_in_model(LoraConfig(r=c.lora_r, lora_alpha=c.lora_alpha, lora_dropout=c.lora_dropout,
                                            target_modules=list(c.lora_targets), bias="none"), self.expert)
 
+    # ------------------------------------------------------------------ LoRA on the VLM backbone
+    @property
+    def text_model(self) -> nn.Module:
+        return self.model.vlm_with_expert.get_vlm_model().text_model
+
+    def _vlm_lora_sites(self) -> list[tuple[int, str]]:
+        """(layer, projection) pairs that get an adapter. In the very last layer only k / v reach the action
+        expert; its q / o feed an output nobody reads and would never receive a gradient."""
+        total = len(self.text_model.layers)
+        first = total - self.config.vlm_lora_layers
+        if not 0 <= first < total:
+            raise ValueError(f"vlm_lora_layers must be in 1..{total}, got {self.config.vlm_lora_layers}")
+        return [(i, t) for i in range(first, total) for t in self.config.vlm_lora_targets
+                if not (i == total - 1 and t in ("q_proj", "o_proj"))]
+
+    def _inject_vlm_lora(self):
+        from peft import LoraConfig, inject_adapter_in_model
+
+        c = self.config
+        pattern = "|".join(rf"layers\.{i}\.self_attn\.{t}" for i, t in self._vlm_lora_sites())
+        inject_adapter_in_model(LoraConfig(r=c.vlm_lora_r, lora_alpha=c.vlm_lora_alpha, lora_dropout=c.vlm_lora_dropout,
+                                           target_modules=pattern, bias="none"), self.text_model)
+
+    def add_vlm_lora(self, r: int):
+        """Add adapters to the VLM of a policy that has none; layers / targets / alpha / dropout come from the
+        config. Needs vlm_float32 (set it when building), otherwise the adapters would live in bf16."""
+        if self.config.vlm_lora_r > 0:
+            raise RuntimeError("this policy already has VLM LoRA adapters")
+        if not self.config.vlm_float32:
+            raise RuntimeError("build the policy with vlm_float32=True before adding VLM LoRA")
+        self.config.vlm_lora_r = int(r)
+        self._inject_vlm_lora()
+        self.to(next(self.model.action_out_proj.parameters()).device)
+
     def add_lora(self, r: int, alpha: int = 32, dropout: float = 0.0, targets: list[str] | None = None):
         """Add LoRA adapters to the action expert of a policy that has none (recorded in the config, so a
         saved checkpoint rebuilds them on load)."""
@@ -249,24 +322,25 @@ class DepthSmolVLAPolicy(SmolVLAPolicy):
         self.to(next(self.model.action_out_proj.parameters()).device)
 
     def merge_lora(self):
-        """Fold the adapters into the expert's weights and remove them: a plain frozen network for deployment
-        (same outputs, no adapter overhead). The config then says lora_r = 0."""
+        """Fold the expert's and the VLM's adapters into their weights and remove them: a plain frozen network for
+        deployment (same outputs, no adapter overhead). The config then says lora_r = vlm_lora_r = 0."""
         from peft.tuners.lora import LoraLayer
 
-        if self.config.lora_r <= 0:
-            return
-        for parent in list(self.expert.modules()):
-            for name, child in list(parent.named_children()):
-                if isinstance(child, LoraLayer):
-                    child.merge()
-                    setattr(parent, name, child.get_base_layer())
-        self.config.lora_r = 0
+        for root in (self.expert, self.text_model):
+            for parent in list(root.modules()):
+                for name, child in list(parent.named_children()):
+                    if isinstance(child, LoraLayer):
+                        child.merge()
+                        setattr(parent, name, child.get_base_layer())
+        self.config.lora_r = self.config.vlm_lora_r = 0
 
     # ------------------------------------------------------------------ freezing
-    def configure_trainable(self, mode: str = "lora", train_heads: bool = True) -> dict[str, int]:
+    def configure_trainable(self, mode: str = "lora", train_heads: bool = True,
+                            train_connector: bool = False) -> dict[str, int]:
         """Freeze everything, then enable: the expert's LoRA adapters ("lora") or the whole expert ("expert"),
         the depth fusion MLP + gate, and (train_heads) the state / action / time projections.
-        SigLIP, the connector, the VLM layers and DeFM always stay frozen."""
+        Of the VLM only its LoRA adapters (if it has any) and, with train_connector, the connector train.
+        SigLIP, DeFM and the VLM's own text weights always stay frozen."""
         if mode not in TRAIN_MODES:
             raise ValueError(f"mode must be one of {TRAIN_MODES}")
         if mode == "lora" and self.config.lora_r <= 0:
@@ -279,6 +353,12 @@ class DepthSmolVLAPolicy(SmolVLAPolicy):
         elif mode == "expert":
             for n, p in self.expert.named_parameters():
                 p.requires_grad = "lm_head" not in n
+        for n, p in self.text_model.named_parameters():
+            p.requires_grad = "lora_" in n
+        if train_connector:
+            if not self.config.connector_float32:
+                raise ValueError("train_connector needs a policy built with connector_float32=True")
+            m.vlm_with_expert.get_vlm_model().connector.requires_grad_(True)
         if train_heads:
             for h in HEADS:
                 getattr(m, h).requires_grad_(True)
@@ -288,7 +368,8 @@ class DepthSmolVLAPolicy(SmolVLAPolicy):
 
     def count_parameters(self) -> dict[str, int]:
         groups = {"depth_fusion": "model.depth_fusion.", "defm": "model.depth_encoder.",
-                  "expert": "model.vlm_with_expert.lm_expert.", "vlm": "model.vlm_with_expert.vlm."}
+                  "expert": "model.vlm_with_expert.lm_expert.",
+                  "connector": "model.vlm_with_expert.vlm.model.connector.", "vlm": "model.vlm_with_expert.vlm."}
         out = {f"{g}_{k}": 0 for g in (*groups, "heads") for k in ("trainable", "frozen")}
         for n, p in self.named_parameters():
             g = next((g for g, pre in groups.items() if n.startswith(pre)), "heads")
@@ -296,18 +377,29 @@ class DepthSmolVLAPolicy(SmolVLAPolicy):
         out["total_trainable"] = sum(v for k, v in out.items() if k.endswith("_trainable"))
         return out
 
-    def param_groups(self, lr: float, depth_lr_mult: float = 4.0) -> list[dict]:
+    def param_groups(self, lr: float, depth_lr_mult: float = 4.0, vlm_lr_mult: float = 0.5) -> list[dict]:
         """Optimizer groups: the new depth fusion weights get lr * depth_lr_mult (they start from scratch and
-        behind a zero gate), everything else lr."""
-        depth = [p for n, p in self.named_parameters() if p.requires_grad and n.startswith("model.depth_fusion.")]
-        rest = [p for n, p in self.named_parameters() if p.requires_grad and not n.startswith("model.depth_fusion.")]
+        behind a zero gate), the pretrained VLM parts (connector, LoRA) lr * vlm_lr_mult, everything else lr."""
+        fusion, vlm = "model.depth_fusion.", "model.vlm_with_expert.vlm."
+        named = [(n, p) for n, p in self.named_parameters() if p.requires_grad]
+        depth = [p for n, p in named if n.startswith(fusion)]
+        backbone = [p for n, p in named if n.startswith(vlm)]
+        rest = [p for n, p in named if not n.startswith((fusion, vlm))]
         groups = [{"params": rest, "lr": lr, "lr_mult": 1.0, "name": "policy"}]
         if depth:
             groups.append({"params": depth, "lr": lr * depth_lr_mult, "lr_mult": depth_lr_mult, "name": "depth_fusion"})
+        if backbone:
+            groups.append({"params": backbone, "lr": lr * vlm_lr_mult, "lr_mult": vlm_lr_mult, "name": "vlm"})
         return [g for g in groups if g["params"]]
 
     def gate_abs_mean(self) -> float:
         return float(self.model.depth_fusion.gate.detach().abs().mean()) if self.config.use_depth else 0.0
+
+    def depth_ratio(self) -> float:
+        """|depth residual| / |RGB image token| in the last forward pass (mean over depth cameras). The gate value
+        alone says little: it multiplies an MLP output of arbitrary size."""
+        r = self.model._depth_ratio
+        return float(r) if r is not None else 0.0
 
 
 # ---------------------------------------------------------------------- build / load
@@ -326,7 +418,8 @@ def _checkpoint_keys(init_from: str) -> set[str]:
 
 def build_policy(init_from: str, input_features: dict, output_features: dict, *, device: str = "cuda",
                  lora_r: int = 0, lora_alpha: int = 32, lora_dropout: float = 0.0,
-                 lora_targets: list[str] | None = None, **overrides) -> DepthSmolVLAPolicy:
+                 lora_targets: list[str] | None = None, vlm_lora_r: int = 0, train_connector: bool = False,
+                 **overrides) -> DepthSmolVLAPolicy:
     """New training run. `init_from` is `lerobot/smolvla_base` (or any stock SmolVLA checkpoint) or one of this
     project's checkpoints (e.g. the RGB-only run, to warm-start the RGB-D run from it).
 
@@ -339,7 +432,13 @@ def build_policy(init_from: str, input_features: dict, output_features: dict, *,
     if src_lora and lora_r and lora_r != src_lora:
         raise ValueError(f"{init_from} already has LoRA r={src_lora}; cannot re-initialise with r={lora_r} "
                          "(merge it first with scripts/merge_for_deploy.py)")
+    src_vlm_lora = int(getattr(src, "vlm_lora_r", 0))
+    if src_vlm_lora and vlm_lora_r and vlm_lora_r != src_vlm_lora:
+        raise ValueError(f"{init_from} already has VLM LoRA r={src_vlm_lora}; cannot re-initialise with r={vlm_lora_r} "
+                         "(merge it first with scripts/merge_for_deploy.py)")
     kw.update(overrides)
+    kw["vlm_float32"] = bool(kw.get("vlm_float32")) or vlm_lora_r > 0
+    kw["connector_float32"] = bool(kw.get("connector_float32")) or train_connector
     kw.update(input_features=input_features, output_features=output_features, device=device, defm_pretrained=True)
     if not src_lora:
         kw["lora_r"] = 0  # build without adapters so the plain expert weights load, add them afterwards
@@ -356,6 +455,8 @@ def build_policy(init_from: str, input_features: dict, output_features: dict, *,
         log.warning("%d weights in %s were not used, e.g. %s", len(unexpected), init_from, unexpected[:5])
     if not src_lora and lora_r > 0:
         policy.add_lora(lora_r, lora_alpha, lora_dropout, lora_targets)
+    if not src_vlm_lora and vlm_lora_r > 0:
+        policy.add_vlm_lora(vlm_lora_r)
     return policy
 
 

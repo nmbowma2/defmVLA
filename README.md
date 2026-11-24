@@ -159,7 +159,13 @@ CUDA_VISIBLE_DEVICES=1 python scripts/train.py --config configs/train_rgbd.yaml 
 
 Any key can be overridden on the command line (`train.steps=2000 model.lora_r=32
 data.train_roots='[data/normal_train,data/low_contrast_train]' train.run_dir=runs/rgbd_mixed_seed0`).
-`train_log.jsonl` logs loss, validation loss and `depth_gate` (mean |gate|: 0 = depth unused; it should rise).
+`train_log.jsonl` logs loss, validation loss and `depth_gate` (mean |gate|) and `depth_ratio`
+(size of the depth residual relative to the RGB tokens). The gate alone does not say whether depth is used: it
+multiplies an MLP output of arbitrary size. The depth on / off error of step 3 does.
+
+Backbone adaptation (off in the yaml files, on in `scripts/run_pipeline.sh`): `model.vlm_lora_r=16` puts LoRA on
+the attention of the last `model.vlm_lora_layers` VLM layers and `train.train_connector=true` trains the image
+projector, both at `lr * train.vlm_lr_mult`.
 
 The experiment grid is 2 configs x 2 data settings; keep the total number of episodes equal between
 "normal" and "normal + low contrast", and use the same seeds:

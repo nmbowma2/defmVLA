@@ -6,9 +6,10 @@
   python scripts/train.py --config configs/train_rgbd.yaml train.steps=2000 model.lora_r=32   # overrides
   CUDA_VISIBLE_DEVICES=1 python scripts/train.py --config ...                 # pick a GPU on the server
 
-Frozen: SigLIP, connector, VLM layers, DeFM.  Trained: depth fusion (MLP + gate), the action expert (LoRA
-adapters by default, train.mode=expert for all of it) and, with train.train_heads, the state / action / time
-projections. Checkpoints hold the policy, its pre/post-processors (normalisation statistics of the TRAIN split)
+Frozen: SigLIP, VLM layers, DeFM.  Trained: depth fusion (MLP + gate), the action expert (LoRA adapters by
+default, train.mode=expert for all of it) and, with train.train_heads, the state / action / time projections.
+Off by default: model.vlm_lora_r > 0 (LoRA on the attention of the last model.vlm_lora_layers VLM layers) and
+train.train_connector=true (the VLM's image projector, all of it); both use lr * train.vlm_lr_mult. Checkpoints hold the policy, its pre/post-processors (normalisation statistics of the TRAIN split)
 and defmvla_contract.json, so deployment needs nothing else.
 """
 
@@ -32,8 +33,10 @@ DEFAULTS = {
               "defm_variant": "defm_vit_s14", "defm_weights_path": None, "defm_input_size": 448,
               "depth_pool": "unshuffle", "depth_hidden": 1024, "depth_max_m": 0.0, "depth_dropout": 0.25,
               "depth_noise_m": 0.0, "lora_r": 16, "lora_alpha": 32, "lora_dropout": 0.0,
-              "lora_targets": ["q_proj", "k_proj", "v_proj", "o_proj"]},
-    "train": {"mode": "lora", "train_heads": True, "steps": 5000, "batch_size": 16, "grad_accum": 2, "lr": 1e-4,
+              "lora_targets": ["q_proj", "k_proj", "v_proj", "o_proj"],
+              "vlm_lora_r": 0, "vlm_lora_alpha": 32, "vlm_lora_dropout": 0.0, "vlm_lora_layers": 8,
+              "vlm_lora_targets": ["q_proj", "k_proj", "v_proj", "o_proj"]},
+    "train": {"mode": "lora", "train_heads": True, "train_connector": False, "vlm_lr_mult": 0.5, "steps": 5000, "batch_size": 16, "grad_accum": 2, "lr": 1e-4,
               "depth_lr_mult": 4.0, "decay_lr": 2.5e-6, "warmup_steps": 200, "weight_decay": 1e-10,
               "grad_clip": 10.0, "precision": "bf16", "seed": 0, "num_workers": 8, "log_every": 20,
               "save_every": 1000, "val_every": 500, "val_batches": 16, "device": "cuda", "run_dir": None},
@@ -120,13 +123,15 @@ def main(argv=None):
         M["init_from"], inputs, outputs, device=T["device"],
         lora_r=M["lora_r"] if T["mode"] == "lora" else 0, lora_alpha=M["lora_alpha"],
         lora_dropout=M["lora_dropout"], lora_targets=M["lora_targets"],
+        vlm_lora_r=M["vlm_lora_r"], train_connector=T["train_connector"], vlm_lora_alpha=M["vlm_lora_alpha"],
+        vlm_lora_dropout=M["vlm_lora_dropout"], vlm_lora_layers=M["vlm_lora_layers"], vlm_lora_targets=M["vlm_lora_targets"],
         use_depth=M["use_depth"], depth_map={RGB_KEY.format(c): DEPTH_KEY.format(c) for c in depth_cameras},
         chunk_size=M["horizon"], n_action_steps=M["n_action_steps"], empty_cameras=0,
         freeze_vision_encoder=True, train_expert_only=True, use_amp=T["precision"] != "fp32",
         defm_variant=M["defm_variant"], defm_weights_path=M["defm_weights_path"],
         defm_input_size=M["defm_input_size"], depth_pool=M["depth_pool"], depth_hidden=M["depth_hidden"],
         depth_max_m=M["depth_max_m"], depth_dropout=M["depth_dropout"], depth_noise_m=M["depth_noise_m"])
-    counts = policy.configure_trainable(T["mode"], T["train_heads"])
+    counts = policy.configure_trainable(T["mode"], T["train_heads"], T["train_connector"])
     print(json.dumps({"parameters": counts}), flush=True)
     pre, post = make_processors(policy.config, stats)
 
@@ -135,21 +140,22 @@ def main(argv=None):
                 "horizon": M["horizon"], "n_action_steps": M["n_action_steps"], "use_depth": M["use_depth"],
                 "depth": "planar z-depth in metres, pixel-aligned with the RGB of the same camera, 0 = invalid",
                 "depth_max_m": M["depth_max_m"], "defm_variant": M["defm_variant"], "init_from": M["init_from"],
-                "arm_prompt": D["arm_prompt"], "train_roots": D["train_roots"], "train_mode": T["mode"], "lora_r": policy.config.lora_r}
+                "arm_prompt": D["arm_prompt"], "train_roots": D["train_roots"], "train_mode": T["mode"], "lora_r": policy.config.lora_r,
+                "vlm_lora_r": policy.config.vlm_lora_r, "vlm_lora_layers": policy.config.vlm_lora_layers, "train_connector": T["train_connector"]}
 
     ds = make_dataset(train_eps, M["horizon"], cameras, depth_cameras)
     g = torch.Generator().manual_seed(T["seed"])
     loader = torch.utils.data.DataLoader(ds, batch_size=T["batch_size"], shuffle=True, drop_last=True, generator=g,
                                          num_workers=T["num_workers"], persistent_workers=T["num_workers"] > 0,
                                          pin_memory=dev.type == "cuda")
-    val_loader = None
+    val_loader, val_gen = None, torch.Generator()
     if val_eps:
         val_loader = torch.utils.data.DataLoader(make_dataset(val_eps, M["horizon"], cameras, depth_cameras),
                                                  batch_size=T["batch_size"], shuffle=True,
-                                                 generator=torch.Generator().manual_seed(1234),
+                                                 generator=val_gen,
                                                  num_workers=min(2, T["num_workers"]))
 
-    groups = policy.param_groups(T["lr"], T["depth_lr_mult"])
+    groups = policy.param_groups(T["lr"], T["depth_lr_mult"], T["vlm_lr_mult"])
     params = [p for gp in groups for p in gp["params"]]
     opt = torch.optim.AdamW(groups, betas=(0.9, 0.95), eps=1e-8, weight_decay=T["weight_decay"])
     amp = T["precision"] == "bf16" and dev.type == "cuda"
@@ -164,6 +170,7 @@ def main(argv=None):
         """Mean flow-matching loss on a fixed slice of the val split with fixed noise / time (comparable
         across steps and runs). Train-mode extras (depth dropout / noise, LoRA dropout) are off."""
         policy.eval()
+        val_gen.manual_seed(1234)  # the same samples at every validation, so checkpoints can be compared
         gen = torch.Generator(device=dev).manual_seed(0)
         tot, n = 0.0, 0
         for i, b in enumerate(val_loader):
@@ -205,7 +212,8 @@ def main(argv=None):
         step += 1
         if step % T["log_every"] == 0 or step == 1:
             rec = {"step": step, "loss": round(tot, 5), "grad_norm": round(gn, 4), "lr": opt.param_groups[0]["lr"],
-                   "depth_gate": round(policy.gate_abs_mean(), 6), "elapsed_s": round(time.time() - t0, 1)}
+                   "depth_gate": round(policy.gate_abs_mean(), 6),
+                   "depth_ratio": round(policy.depth_ratio(), 5), "elapsed_s": round(time.time() - t0, 1)}
             if dev.type == "cuda":
                 rec["peak_gb"] = round(torch.cuda.max_memory_allocated(dev) / 2**30, 2)
             if val_loader is not None and (step % T["val_every"] == 0 or step == T["steps"]):
