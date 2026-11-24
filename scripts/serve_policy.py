@@ -3,6 +3,7 @@
 
   python scripts/serve_policy.py --checkpoint runs/rgbd_normal/checkpoint_005000_deploy --port 6040
   ... --host 0.0.0.0        # accept connections from another machine (e.g. serve on the GPU box)
+  ... --depth-off            # ablation: an RGB-D checkpoint with its depth residual switched off (as in eval_offline)
   ... --self-test DIR       # one forward pass on frame 0 of an episode directory, print the chunk, exit
 
 Protocol (multiprocessing.connection, one request -> one reply; client: defmvla.client.PolicyClient):
@@ -29,7 +30,7 @@ from defmvla.runtime import load_processors, observation_batch, preprocess, read
 
 
 class Runner:
-    def __init__(self, checkpoint, device, seed, precision):
+    def __init__(self, checkpoint, device, seed, precision, depth_off=False):
         import torch
 
         from defmvla.policy import load_policy
@@ -38,10 +39,15 @@ class Runner:
         self.contract = read_contract(checkpoint)
         self.policy = load_policy(checkpoint, device)
         self.policy.merge_lora()
+        if depth_off:
+            if not self.policy.config.use_depth:
+                raise SystemExit("--depth-off needs an RGB-D checkpoint")
+            self.policy.config.use_depth = False  # the weights stay loaded, the residual is never added
         self.pre, self.post = load_processors(checkpoint, self.policy.config, device)
         self.amp = precision == "bf16" and device.startswith("cuda")
         self.info = {**self.contract, "checkpoint": os.path.abspath(checkpoint), "device": device,
                      "chunk_size": self.policy.config.chunk_size, "seed": self.seed, "precision": precision,
+                     "use_depth": self.policy.config.use_depth, "depth_off": bool(depth_off),
                      "trainable_parameters": sum(p.numel() for p in self.policy.parameters() if p.requires_grad)}
         self.reset()
 
@@ -94,10 +100,11 @@ def main():
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--precision", choices=("bf16", "fp32"), default="bf16")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--depth-off", action="store_true", help="switch the depth residual of an RGB-D checkpoint off")
     ap.add_argument("--self-test", default=None, metavar="EPISODE_DIR")
     a = ap.parse_args()
 
-    r = Runner(a.checkpoint, a.device, a.seed, a.precision)
+    r = Runner(a.checkpoint, a.device, a.seed, a.precision, a.depth_off)
     print(json.dumps(r.info, default=str), flush=True)
     if a.self_test:
         self_test(r, a.self_test)
