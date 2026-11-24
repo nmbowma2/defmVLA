@@ -49,14 +49,36 @@ class DeFMEncoder(nn.Module):
         return self
 
     @torch.no_grad()
-    def forward(self, depth_m: Tensor) -> Tensor:
+    def forward(self, depth_m: Tensor, valid_norm: bool = False) -> Tensor:
+        """valid_norm: scale DeFM's per-image channel over valid (> 0) pixels only, see `preprocess_valid`."""
         from defm.utils.utils import preprocess_depth_batch
 
         with torch.autocast(device_type=depth_m.device.type, enabled=False):
-            x = preprocess_depth_batch(depth_m.float(), target_size=self.input_size, patch_size=DEFM_PATCH,
+            x = preprocess_valid(depth_m.float(), self.input_size) if valid_norm else preprocess_depth_batch(depth_m.float(), target_size=self.input_size, patch_size=DEFM_PATCH,
                                        device=depth_m.device)
             feat = self.model.get_intermediate_layers(x, n=1, reshape=True, return_class_token=False)[0]
         return feat.float()
+
+
+def preprocess_valid(depth_m: Tensor, size: int) -> Tensor:
+    """DeFM's 3-channel input (log depth / log 101, log depth / log 10, log depth scaled per image), but the per-image
+    channel takes its min and max from VALID pixels: stock DeFM counts the 0 of an invalid (or padded) pixel as the
+    nearest depth, which squeezes the real range. Invalid pixels stay 0 in every channel."""
+    from defm.utils.utils import make_norm_transform
+
+    if depth_m.shape[-2:] != (size, size):
+        raise ValueError(f"expected depth already at {size} x {size}, got {tuple(depth_m.shape)}")
+    valid = depth_m > 0
+    log = torch.log1p(depth_m.clamp(0.0, 100.0))
+    c1 = log / math.log1p(100.0)
+    c2 = (log / math.log1p(9.0)).clamp(0.0, 1.0)
+    lo = torch.where(valid, log, torch.full_like(log, math.inf)).amin((-2, -1), keepdim=True)
+    hi = torch.where(valid, log, torch.full_like(log, -math.inf)).amax((-2, -1), keepdim=True)
+    span = hi - lo
+    ok = valid & (span > 0)  # also False when nothing is valid (span = -inf)
+    c3 = torch.where(ok, (log - torch.where(ok, lo, torch.zeros_like(log))) / torch.where(span > 0, span, torch.ones_like(span)),
+                     torch.zeros_like(log))
+    return make_norm_transform(size, size, to_tensor=False)(torch.cat([c1, c2, c3], dim=1))
 
 
 class DepthFusion(nn.Module):
@@ -103,6 +125,17 @@ def resize_depth_like_rgb(depth: Tensor, width: int, height: int) -> Tensor:
     ratio = max(cur_w / width, cur_h / height)
     new_h, new_w = int(cur_h / ratio), int(cur_w / ratio)
     out = F.interpolate(depth, size=(new_h, new_w), mode="nearest")
+    return F.pad(out, (max(0, width - new_w), 0, max(0, height - new_h), 0), value=0.0)
+
+
+def resize_rgb_antialias(img: Tensor, width: int, height: int) -> Tensor:
+    """(B, 3, H, W) -> same geometry as `resize_depth_like_rgb`, antialiased; padding is black (0)."""
+    cur_h, cur_w = img.shape[-2:]
+    if (cur_h, cur_w) == (height, width):
+        return img
+    ratio = max(cur_w / width, cur_h / height)
+    new_h, new_w = int(cur_h / ratio), int(cur_w / ratio)
+    out = F.interpolate(img.float(), size=(new_h, new_w), mode="bilinear", align_corners=False, antialias=True).clamp(0.0, 1.0)
     return F.pad(out, (max(0, width - new_w), 0, max(0, height - new_h), 0), value=0.0)
 
 

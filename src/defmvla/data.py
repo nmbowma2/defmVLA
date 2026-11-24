@@ -78,7 +78,11 @@ def check_roots(roots: Sequence[str]) -> Dict:
 class EpisodeDataset:
     """Module-level (picklable) so DataLoader workers work with any start method."""
 
-    def __init__(self, episodes: List[Dict], horizon: int, cameras: Sequence[str], depth_cameras: Sequence[str]):
+    def __init__(self, episodes: List[Dict], horizon: int, cameras: Sequence[str], depth_cameras: Sequence[str],
+                 rgb_size: int = 0, depth_size: int = 0):
+        """rgb_size / depth_size > 0: letterbox to the encoder's input size here, in the worker (same functions as the model
+        uses on live frames), so queued batches hold encoder-sized tensors instead of full-resolution frames."""
+        self.rgb_size, self.depth_size = int(rgb_size), int(depth_size)
         self.episodes, self.horizon = episodes, horizon
         self.cameras, self.depth_cameras = list(cameras), list(depth_cameras)
         self.index = [(i, t) for i, e in enumerate(episodes) for t in range(len(e["state"]))]
@@ -100,12 +104,21 @@ class EpisodeDataset:
              "task": e["task"]}
         for c in self.cameras:
             img = np.array(Image.open(os.path.join(e["dir"], f"rgb.{c}", f"{t:06d}.png")).convert("RGB"))
-            s[RGB_KEY.format(c)] = torch.from_numpy(img).permute(2, 0, 1).float() / 255.0
+            x = torch.from_numpy(img).permute(2, 0, 1).float() / 255.0
+            if self.rgb_size:
+                from .fusion import resize_rgb_antialias
+                x = resize_rgb_antialias(x[None], self.rgb_size, self.rgb_size)[0].contiguous()
+            s[RGB_KEY.format(c)] = x
         for c in self.depth_cameras:
             d = np.asarray(Image.open(os.path.join(e["dir"], f"depth.{c}", f"{t:06d}.png")))
-            s[DEPTH_KEY.format(c)] = torch.from_numpy(depth_u16_to_m(d))[None]
+            x = torch.from_numpy(depth_u16_to_m(d))[None]
+            if self.depth_size:
+                from .fusion import resize_depth_like_rgb
+                x = resize_depth_like_rgb(x[None], self.depth_size, self.depth_size)[0].contiguous()
+            s[DEPTH_KEY.format(c)] = x
         return s
 
 
-def make_dataset(episodes: List[Dict], horizon: int, cameras: Sequence[str], depth_cameras: Sequence[str]):
-    return EpisodeDataset(episodes, horizon, cameras, depth_cameras)
+def make_dataset(episodes: List[Dict], horizon: int, cameras: Sequence[str], depth_cameras: Sequence[str],
+                 rgb_size: int = 0, depth_size: int = 0):
+    return EpisodeDataset(episodes, horizon, cameras, depth_cameras, rgb_size, depth_size)

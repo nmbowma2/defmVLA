@@ -29,13 +29,14 @@ import logging
 from dataclasses import dataclass, field
 
 import torch
+import torch.nn.functional as F  # noqa: N812
 from torch import Tensor, nn
 
 from lerobot.configs import PreTrainedConfig
 from lerobot.policies.smolvla.configuration_smolvla import SmolVLAConfig
 from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
 
-from .fusion import DeFMEncoder, DepthFusion, resize_depth_like_rgb
+from .fusion import DeFMEncoder, DepthFusion, resize_depth_like_rgb, resize_rgb_antialias
 
 log = logging.getLogger(__name__)
 
@@ -60,6 +61,13 @@ class DepthSmolVLAConfig(SmolVLAConfig):
     depth_max_m: float = 0.0  # > 0: clamp depth to this range before DeFM (keeps DeFM's per-image channel stable)
     depth_dropout: float = 0.25  # training: drop the whole depth residual of a sample with this probability
     depth_noise_m: float = 0.0  # training: Gaussian noise (std, metres) on valid depth pixels
+
+    # Full-resolution pipeline (off = the behaviour of earlier checkpoints, which keep working unchanged):
+    # depth outside [near, far] metres becomes 0 = invalid, per depth key, e.g. {"observation.depth.left_wrist": [0.07, 0.5]}
+    depth_range_m: dict[str, list[float]] = field(default_factory=dict)
+    depth_mask_invalid: bool = False  # DeFM scales over valid pixels only; tokens without any valid pixel get no residual
+    # Resize the stored frame once per encoder: RGB antialiased to SigLIP's size, depth straight to DeFM's size.
+    native_resize: bool = False
 
     # --- LoRA on the action expert (0 = no adapters) -------------------------------------------------
     lora_r: int = 0
@@ -86,6 +94,11 @@ class DepthSmolVLAConfig(SmolVLAConfig):
 
     def __post_init__(self):
         super().__post_init__()
+        for k, r in self.depth_range_m.items():
+            if k not in self.depth_map.values() and self.use_depth:
+                raise ValueError(f"depth_range_m key {k!r} is not a depth key of depth_map {self.depth_map}")
+            if len(r) != 2 or not 0 <= r[0] < r[1]:
+                raise ValueError(f"depth_range_m[{k!r}] must be [near, far] in metres, got {r}")
         if self.depth_pool not in ("unshuffle", "avg"):
             raise ValueError(f"depth_pool must be 'unshuffle' or 'avg', got {self.depth_pool!r}")
         if not 0.0 <= self.depth_dropout < 1.0:
@@ -204,6 +217,17 @@ class DepthSmolVLAPolicy(SmolVLAPolicy):
 
         m.embed_prefix = embed_prefix
 
+    def prepare_images(self, batch):
+        """Stock SmolVLA resizes with plain bilinear sampling, which skips pixels when shrinking a full-resolution
+        frame (1280 -> 512). native_resize does the same letterbox geometry antialiased; stock then finds nothing left to do."""
+        if self.config.native_resize and self.config.resize_imgs_with_padding is not None:
+            w, h = self.config.resize_imgs_with_padding
+            batch = dict(batch)
+            for k in (k for k in self.config.image_features if k in batch):
+                img = batch[k][:, -1] if batch[k].ndim == 5 else batch[k]
+                batch[k] = resize_rgb_antialias(img, w, h)
+        return super().prepare_images(batch)
+
     # ------------------------------------------------------------------ depth -> residual tokens
     def depth_residuals(self, batch: dict) -> list[Tensor | None]:
         """One entry per image SmolVLA will embed (same order as `prepare_images`): a (B, 64, 960) residual
@@ -225,16 +249,27 @@ class DepthSmolVLAPolicy(SmolVLAPolicy):
             if d.ndim != 4 or d.shape[1] != 1:
                 raise ValueError(f"{dkey} must be (B, 1, H, W) metric depth, got {tuple(d.shape)}")
             rgb = batch[key]
-            if d.shape[-2:] != rgb.shape[-2:]:
+            sized = (cfg.native_resize and d.shape[-2:] == (m.depth_encoder.input_size,) * 2  # already encoder-sized
+                     and rgb.shape[-2:] == tuple(cfg.resize_imgs_with_padding or ())[::-1])     # by the data loader
+            if d.shape[-2:] != rgb.shape[-2:] and not sized:
                 raise ValueError(f"{dkey} {tuple(d.shape[-2:])} is not pixel-aligned with {key} {tuple(rgb.shape[-2:])}")
             d = torch.nan_to_num(d.float(), nan=0.0, posinf=0.0, neginf=0.0)
+            if dkey in cfg.depth_range_m:
+                near, far = cfg.depth_range_m[dkey]
+                d = torch.where((d >= near) & (d <= far), d, torch.zeros_like(d))
             if cfg.depth_max_m > 0:
                 d = d.clamp(max=cfg.depth_max_m)
             if self.training and cfg.depth_noise_m > 0:
                 d = torch.where(d > 0, (d + cfg.depth_noise_m * torch.randn_like(d)).clamp(min=1e-3), d)
-            if cfg.resize_imgs_with_padding is not None:
+            if cfg.native_resize or cfg.depth_mask_invalid:
+                d = resize_depth_like_rgb(d, m.depth_encoder.input_size, m.depth_encoder.input_size)
+            elif cfg.resize_imgs_with_padding is not None:
                 d = resize_depth_like_rgb(d, *cfg.resize_imgs_with_padding)
-            res = m.depth_fusion(m.depth_encoder(d))
+            res = m.depth_fusion(m.depth_encoder(d, cfg.depth_mask_invalid))
+            if cfg.depth_mask_invalid:
+                cell = d.shape[-1] // m.depth_fusion.out_grid
+                seen = F.max_pool2d((d > 0).float(), cell).flatten(1)[..., None]  # (B, 64, 1)
+                res = res * seen.to(res.dtype)
             if self.training and cfg.depth_dropout > 0:
                 keep = torch.rand(res.shape[0], 1, 1, device=res.device) >= cfg.depth_dropout
                 res = res * keep.to(res.dtype)

@@ -26,7 +26,7 @@ ap.add_argument("--seed", type=int, default=0, help="first attempt seed")
 ap.add_argument("--variant", default="actual", choices=["actual", "upright"], help="actual = arms tilted 45 deg (the real rig)")
 ap.add_argument("--condition", default="normal", choices=["normal", "low_contrast"])
 ap.add_argument("--arm", default="random", choices=["random", "left", "right"])
-ap.add_argument("--square", type=int, default=640)
+ap.add_argument("--square", type=int, default=640, help="centre-crop + resize to this size; 0 = full frames (same value for recording and evaluation)")
 ap.add_argument("--scenario", default="pick_place", choices=["pick_place", "pick_place_camo", "open_drawer"])
 ap.add_argument("--task", default=None, help="language instruction (default: the scenario's, see sim/duo_env.py SCENARIOS)")
 ap.add_argument("--cameras-yaml", default=None)
@@ -52,7 +52,7 @@ sim = DuoSim(variant=a.variant, condition=a.condition, cameras_yaml=a.cameras_ya
 a.task = a.task or sim.task
 demo = (DrawerDemonstrator(sim) if a.scenario == "open_drawer"
         else Demonstrator(sim, grasp_z=a.grasp_z, close_along=a.close_along))
-w = EpisodeWriter(a.out, cameras=CAMS, depth_cameras=CAMS, fps=sim.fps, square=a.square)
+w = EpisodeWriter(a.out, cameras=CAMS, depth_cameras=CAMS, fps=sim.fps, square=a.square or None)
 sim.dump_camera_json(a.out, a.square)
 log = open(os.path.join(a.out, "recording_log.jsonl"), "a")
 saved, tries, max_tries, t0 = 0, 0, (a.max_attempts or 4 * a.episodes), time.time()

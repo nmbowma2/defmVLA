@@ -32,7 +32,7 @@ DEFAULTS = {
     "model": {"init_from": "lerobot/smolvla_base", "use_depth": True, "horizon": 50, "n_action_steps": 50,
               "defm_variant": "defm_vit_s14", "defm_weights_path": None, "defm_input_size": 448,
               "depth_pool": "unshuffle", "depth_hidden": 1024, "depth_max_m": 0.0, "depth_dropout": 0.25,
-              "depth_noise_m": 0.0, "lora_r": 16, "lora_alpha": 32, "lora_dropout": 0.0,
+              "depth_noise_m": 0.0, "wrist_depth_range": None, "depth_mask_invalid": False, "native_resize": False, "lora_r": 16, "lora_alpha": 32, "lora_dropout": 0.0,
               "lora_targets": ["q_proj", "k_proj", "v_proj", "o_proj"],
               "vlm_lora_r": 0, "vlm_lora_alpha": 32, "vlm_lora_dropout": 0.0, "vlm_lora_layers": 8,
               "vlm_lora_targets": ["q_proj", "k_proj", "v_proj", "o_proj"]},
@@ -101,9 +101,9 @@ def main(argv=None):
               "effective_batch": T["batch_size"] * T["grad_accum"],
               "action_std": np.round(stats["action"]["std"], 4).tolist()}
     print(json.dumps(report, indent=1, default=str))
-    if meta["image_hw"][0] != meta["image_hw"][1] and M["use_depth"]:
-        print("WARNING: non-square images are letterboxed to 512 x 512; the padding becomes invalid depth. "
-              "Render square frames if you can.", flush=True)
+    if meta["image_hw"][0] != meta["image_hw"][1] and M["use_depth"] and not M["depth_mask_invalid"]:
+        print("WARNING: non-square images are letterboxed to 512 x 512; the padding counts as depth 0. "
+              "Set model.depth_mask_invalid=true (and model.native_resize=true).", flush=True)
     if a.dry_run:
         return 0
 
@@ -119,6 +119,8 @@ def main(argv=None):
         json.dump(report, fh, indent=1, default=str)
 
     inputs, outputs = make_features(cameras, meta["image_hw"], meta["state_dim"], meta["action_dim"])
+    depth_range = {DEPTH_KEY.format(c): [float(v) for v in M["wrist_depth_range"]] for c in depth_cameras
+                   if "wrist" in c} if M["wrist_depth_range"] else {}
     policy = build_policy(
         M["init_from"], inputs, outputs, device=T["device"],
         lora_r=M["lora_r"] if T["mode"] == "lora" else 0, lora_alpha=M["lora_alpha"],
@@ -130,7 +132,8 @@ def main(argv=None):
         freeze_vision_encoder=True, train_expert_only=True, use_amp=T["precision"] != "fp32",
         defm_variant=M["defm_variant"], defm_weights_path=M["defm_weights_path"],
         defm_input_size=M["defm_input_size"], depth_pool=M["depth_pool"], depth_hidden=M["depth_hidden"],
-        depth_max_m=M["depth_max_m"], depth_dropout=M["depth_dropout"], depth_noise_m=M["depth_noise_m"])
+        depth_max_m=M["depth_max_m"], depth_dropout=M["depth_dropout"], depth_noise_m=M["depth_noise_m"],
+        depth_range_m=depth_range, depth_mask_invalid=M["depth_mask_invalid"], native_resize=M["native_resize"])
     counts = policy.configure_trainable(T["mode"], T["train_heads"], T["train_connector"])
     print(json.dumps({"parameters": counts}), flush=True)
     pre, post = make_processors(policy.config, stats)
@@ -139,18 +142,19 @@ def main(argv=None):
                 "state_dim": meta["state_dim"], "action_dim": meta["action_dim"], "fps": meta["fps"],
                 "horizon": M["horizon"], "n_action_steps": M["n_action_steps"], "use_depth": M["use_depth"],
                 "depth": "planar z-depth in metres, pixel-aligned with the RGB of the same camera, 0 = invalid",
-                "depth_max_m": M["depth_max_m"], "defm_variant": M["defm_variant"], "init_from": M["init_from"],
+                "depth_max_m": M["depth_max_m"], "depth_range_m": depth_range, "native_resize": M["native_resize"], "defm_variant": M["defm_variant"], "init_from": M["init_from"],
                 "arm_prompt": D["arm_prompt"], "train_roots": D["train_roots"], "train_mode": T["mode"], "lora_r": policy.config.lora_r,
                 "vlm_lora_r": policy.config.vlm_lora_r, "vlm_lora_layers": policy.config.vlm_lora_layers, "train_connector": T["train_connector"]}
 
-    ds = make_dataset(train_eps, M["horizon"], cameras, depth_cameras)
+    sizes = (policy.config.resize_imgs_with_padding[0], M["defm_input_size"]) if M["native_resize"] else (0, 0)
+    ds = make_dataset(train_eps, M["horizon"], cameras, depth_cameras, *sizes)
     g = torch.Generator().manual_seed(T["seed"])
     loader = torch.utils.data.DataLoader(ds, batch_size=T["batch_size"], shuffle=True, drop_last=True, generator=g,
                                          num_workers=T["num_workers"], persistent_workers=T["num_workers"] > 0,
                                          pin_memory=dev.type == "cuda")
     val_loader, val_gen = None, torch.Generator()
     if val_eps:
-        val_loader = torch.utils.data.DataLoader(make_dataset(val_eps, M["horizon"], cameras, depth_cameras),
+        val_loader = torch.utils.data.DataLoader(make_dataset(val_eps, M["horizon"], cameras, depth_cameras, *sizes),
                                                  batch_size=T["batch_size"], shuffle=True,
                                                  generator=val_gen,
                                                  num_workers=min(2, T["num_workers"]))

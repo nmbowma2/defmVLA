@@ -121,17 +121,19 @@ For the duo robot use `sim/record_duo.py` (above). The generic recorder API, for
 One camera prim gives both RGB and depth, so they are pixel-aligned. Use `distance_to_image_plane` (planar
 z-depth, what a RealSense reports), not `distance_to_camera`.
 
-SmolVLA letterboxes non-square images, and the padding would become invalid depth, so frames are stored
-square. `square=640` centre-crops every RGB and depth frame to its largest square and resizes it to 640x640
-(`episodes.center_square`): a 1280x720 stream becomes the central 720x720, then 640x640. RGB is
-area-averaged; depth uses nearest neighbour, so depths are never blended across an edge and invalid pixels
-stay invalid. The model itself resizes RGB to 512 and depth to 448, so storing more than 640 gains nothing.
+Frames are stored at full resolution (`square=None`, `sim/cameras_full.yaml`: the calibrated 1280x720 cameras) and
+resized once per encoder: RGB antialiased and letterboxed to 512x512 for SigLIP, depth (nearest neighbour) to 448x448
+for DeFM, same geometry. Train with `model.native_resize=true model.depth_mask_invalid=true
+model.wrist_depth_range=[0.07,0.5]` (the pipeline does): wrist depth outside 7-50 cm is invalid (0), DeFM's per-image
+scaling ignores invalid and padded pixels, and tokens with no valid depth get no depth residual. The settings are
+stored in the checkpoint, so live frames are treated the same; send full frames (no `square`).
+`RIG=square` (`square=640`: centre crop, then 640x640) is the earlier behaviour, kept for checkpoints trained that way.
 
 ```python
 from defmvla.episodes import EpisodeWriter
 
 cams = ["left_wrist", "right_wrist", "front"]                       # 2 x D405, 1 x D435
-w = EpisodeWriter("data/normal_train", cameras=cams, depth_cameras=cams, fps=30, square=640)
+w = EpisodeWriter("data/normal_train", cameras=cams, depth_cameras=cams, fps=30)
 w.start()
 for step in episode:
     w.add_frame(rgb={c: rgb[c] for c in cams},                     # uint8 (H, W, 3), any aspect ratio
@@ -211,7 +213,7 @@ In the Isaac Sim process:
 ```python
 from defmvla.client import PolicyClient
 
-pc = PolicyClient(port=6040, square=640)       # same square= as the EpisodeWriter that recorded the data
+pc = PolicyClient(port=6040)                   # full frames; square=640 only if trained that way: same square= as the EpisodeWriter that recorded the data
 info = pc.info()
 for seed in eval_seeds:
     env.reset(seed=seed); pc.reset(seed=seed)

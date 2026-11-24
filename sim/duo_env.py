@@ -289,15 +289,18 @@ class DuoSim:
         return T @ cam
 
     def camera_info(self, square):
-        """Intrinsics of every camera as rendered and after EpisodeWriter's centre square crop + resize to `square`."""
+        """Intrinsics of every camera as rendered and after EpisodeWriter's centre square crop + resize to `square`
+        (0 / None: stored exactly as rendered)."""
         out = {}
         for n in CAMS:
             c = self.cam_cfg[n]
             W, H = c["resolution"]
             fx = W / (2 * np.tan(np.radians(c["hfov_deg"]) / 2))
-            s = square / min(W, H)
             out[n] = dict(resolution=[W, H], hfov_deg=c["hfov_deg"], fx=fx, fy=fx, cx=W / 2, cy=H / 2, clip=c["clip"],
-                          square=dict(size=square, fx=fx * s, fy=fx * s, cx=square / 2, cy=square / 2,
+                          depth_range=c.get("depth_range"))
+            if square:
+                s = square / min(W, H)
+                out[n].update(square=dict(size=square, fx=fx * s, fy=fx * s, cx=square / 2, cy=square / 2,
                                       hfov_deg=float(np.degrees(2 * np.arctan(min(W, H) / 2 / fx)))))
         return out
 
@@ -369,6 +372,9 @@ class DuoSim:
         for n, c in self.cams.items():
             rgb[n] = np.asarray(c.get_rgba())[..., :3].astype(np.uint8)
             d = np.asarray(c.get_current_frame()["distance_to_image_plane"]).astype(np.float32).squeeze()
+            if self.cam_cfg[n].get("depth_range"):                      # the sensor's usable range; outside = no reading
+                near, far = self.cam_cfg[n]["depth_range"]
+                d = np.where((d >= near) & (d <= far), d, 0.0).astype(np.float32)
             d[~np.isfinite(d)] = 0.0                                # no reading -> 0 (the dataset's invalid value)
             dep[n] = d
         return rgb, dep

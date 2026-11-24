@@ -23,7 +23,7 @@ ap.add_argument("--max-steps", type=int, default=240, help="policy steps per epi
 ap.add_argument("--variant", default="actual", choices=["actual", "upright"])
 ap.add_argument("--condition", default="normal", choices=["normal", "low_contrast"])
 ap.add_argument("--arm", default="random", choices=["random", "left", "right"])
-ap.add_argument("--square", type=int, default=640, help="same value the training data was recorded with")
+ap.add_argument("--square", type=int, default=640, help="centre-crop + resize to this size; 0 = full frames (same value for recording and evaluation)")
 ap.add_argument("--scenario", default="pick_place", choices=["pick_place", "pick_place_camo", "open_drawer"])
 ap.add_argument("--task", default=None, help="language instruction (default: the scenario's; must match the training data)")
 ap.add_argument("--cameras-yaml", default=None)
@@ -84,7 +84,7 @@ summary = dict(scenario=a.scenario, task=a.task, condition=a.condition, variant=
                success_rate=round(sum(r["success"] for r in results) / max(n, 1), 3),
                by_arm={arm: f"{sum(r['success'] for r in results if r['arm'] == arm)}/{sum(r['arm'] == arm for r in results)}"
                        for arm in ("left", "right")},
-               n_exec=n_exec, checkpoint=info.get("checkpoint"), use_depth=info.get("use_depth"), step=info.get("step"))
+               square=a.square, cameras_yaml=a.cameras_yaml, n_exec=n_exec, checkpoint=info.get("checkpoint"), use_depth=info.get("use_depth"), step=info.get("step"))
 print("SUMMARY", json.dumps(summary), flush=True)
 if a.out:
     os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)

@@ -75,7 +75,8 @@ if __name__ == "__main__":
             print(f"\ncameras.json ({r}): variant {j['variant']}, condition {j['condition']}")
             for n, c in j["intrinsics"].items():
                 print(f"  {n:<12} rendered {c['resolution'][0]}x{c['resolution'][1]} hfov {c['hfov_deg']:.1f} deg -> "
-                      f"after square crop to {c['square']['size']}: hfov {c['square']['hfov_deg']:.1f} deg")
+                      + (f"after square crop to {c['square']['size']}: hfov {c['square']['hfov_deg']:.1f} deg" if c.get("square")
+                         else f"stored uncropped, depth range {c.get('depth_range') or 'unlimited'}"))
             break
 
     # low-dim statistics

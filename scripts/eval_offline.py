@@ -49,7 +49,8 @@ def main():
     for item in a.roots:
         name, root = item.split("=", 1)
         eps = load_low_dim([root], c.get("arm_prompt", False))
-        ds = make_dataset(eps, cfg.chunk_size, c["cameras"], c["depth_cameras"])
+        ds = make_dataset(eps, cfg.chunk_size, c["cameras"], c["depth_cameras"],
+                          *((cfg.resize_imgs_with_padding[0], cfg.defm_input_size) if cfg.native_resize else (0, 0)))
         sub = torch.utils.data.Subset(ds, list(range(0, len(ds), a.stride)))
         loader = torch.utils.data.DataLoader(sub, batch_size=a.batch_size, num_workers=a.num_workers)
         err = {m: [] for m in modes}

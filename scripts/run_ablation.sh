@@ -6,6 +6,7 @@
 #
 #   export OMNI_KIT_ACCEPT_EULA=YES                 # your decision, as for run_pipeline.sh
 #   GPU=<n> SCENARIO=open_drawer bash scripts/run_ablation.sh
+# RIG=full|square must match the training data (default: full if EXP ends in _full, else square)
 # Settings: EXP [${SCENARIO}_vlmlora]  CONDS [low_contrast]  RUNS [rgbd_off rgb_same rgbd_repeat]  EVAL_EPS [40]  PORT [6041]
 #   ISAAC_ENV [defmvla-isaac]  TRAIN_ENV [defmvla].  Output: results/closed_${EXP}_<run>_<condition>.json and
 #   results/ablation_$EXP.txt. Existing result files are kept, so a re-run resumes.
@@ -13,7 +14,9 @@ set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 ISAAC_ENV=${ISAAC_ENV:-defmvla-isaac}; TRAIN_ENV=${TRAIN_ENV:-defmvla}; GPU=${GPU:-}; SCENARIO=${SCENARIO:-}
 EXP=${EXP:-${SCENARIO}_vlmlora}; CONDS=${CONDS:-low_contrast}; RUNS=${RUNS:-rgbd_off rgb_same rgbd_repeat}
-EVAL_EPS=${EVAL_EPS:-40}; PORT=${PORT:-6041}
+EVAL_EPS=${EVAL_EPS:-40}; case "$EXP" in *_full) RIG=${RIG:-full} ;; *) RIG=${RIG:-square} ;; esac; RIG_ARGS=()
+[ "$RIG" = full ] && RIG_ARGS=(--cameras-yaml sim/cameras_full.yaml --square 0)
+PORT=${PORT:-6041}
 case "$SCENARIO" in pick_place|pick_place_camo|open_drawer) ;; *) echo "set SCENARIO=pick_place|pick_place_camo|open_drawer"; exit 2 ;; esac
 [[ "$GPU" =~ ^[0-9]+$ ]] || { echo "set GPU=<number>"; exit 2; }
 [ "${OMNI_KIT_ACCEPT_EULA:-}" = YES ] || { echo "Set OMNI_KIT_ACCEPT_EULA=YES yourself first (NVIDIA Omniverse EULA)."; exit 2; }
@@ -47,7 +50,7 @@ run() {
     for try in 1 2 3 4; do   # Isaac sometimes crashes at start-up yet exits 0; the result file is the success test
       [ -s "$out" ] && break
       DUO_GPU=$GPU in_env "$ISAAC_ENV" python sim/eval_closed_loop.py --scenario "$SCENARIO" --port "$PORT" \
-          --episodes "$EVAL_EPS" --seed0 2000000 --condition "$cond" --out "$out" >> "logs/ablation_${EXP}_$name.log" 2>&1
+          --episodes "$EVAL_EPS" --seed0 2000000 --condition "$cond" "${RIG_ARGS[@]}" --out "$out" >> "logs/ablation_${EXP}_$name.log" 2>&1
       [ -s "$out" ] || sleep 10
     done
     [ -s "$out" ] || { echo "$name/$cond failed, see logs/ablation_${EXP}_$name.log"; rc=1; }

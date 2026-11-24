@@ -14,12 +14,14 @@
 # they never enter training. Low contrast is tested zero-shot in closed loop.
 # Settings (environment variables; defaults in brackets):
 #   SCENARIO (required) pick_place | pick_place_camo | open_drawer; recordings in data/${SCENARIO}_*
+#   RIG [full] full = calibrated 1280x720 frames stored uncropped (wrist depth 7-50 cm, rest invalid), each encoder gets its
+#     own letterboxed resize; square = the earlier 640x480 rig cropped to squares. Own data: data/${SCENARIO}_full_*
 #   GPU (required) the physical GPU for Isaac AND training;  ISAAC_ENV [defmvla-isaac]  TRAIN_ENV [defmvla]
 #   WORKERS [4] x EPS [25] = training episodes (100); VAL_WORKERS [2] x VAL_EPS [10] normal validation episodes (20);
 #   LC_VAL_EPS [5] per validation worker of low-contrast validation episodes (10, offline diagnostic only);
 #   STEPS [10000] per model, checkpoints every SAVE_EVERY [2000]; CK_RULE [best] evaluate the saved checkpoint with the
 #     lowest NORMAL validation loss (last = the final one);
-#   EXP [${SCENARIO}_vlmlora] tag for the trained models (a new tag retrains; recordings are reused: their stages are .done);
+#   EXP [${SCENARIO}_full, or ${SCENARIO}_vlmlora with RIG=square] tag for the trained models (a new tag retrains; recordings are reused: their stages are .done);
 #   TRAIN_EXTRA [see below] train.py overrides, the same for the RGB and the RGB-D model
 #     (TRAIN_EXTRA="" = the plain configs/train_*.yaml recipe)
 #   EVAL_EPS [40] closed-loop episodes per (model, condition) [4 runs]; PORT [6040];  DRY_RUN=1 prints the plan only.
@@ -32,14 +34,20 @@ ISAAC_ENV=${ISAAC_ENV:-defmvla-isaac}; TRAIN_ENV=${TRAIN_ENV:-defmvla}; GPU=${GP
 WORKERS=${WORKERS:-4}; EPS=${EPS:-25}; VAL_WORKERS=${VAL_WORKERS:-2}; VAL_EPS=${VAL_EPS:-10}; LC_VAL_EPS=${LC_VAL_EPS:-5}
 STEPS=${STEPS:-10000}; SAVE_EVERY=${SAVE_EVERY:-2000}; EVAL_EPS=${EVAL_EPS:-40}; PORT=${PORT:-6040}
 SCENARIO=${SCENARIO:-}                  # REQUIRED: pick_place | pick_place_camo | open_drawer (sim/duo_env.py)
-EXP=${EXP:-${SCENARIO}_vlmlora}         # tag of the trained models: runs/${EXP}_{rgb,rgbd}, results/closed_${EXP}_*
+RIG=${RIG:-full}
+case "$RIG" in
+  full)   EXP=${EXP:-${SCENARIO}_full}; RIG_ARGS=(--cameras-yaml sim/cameras_full.yaml --square 0) ;;
+  square) EXP=${EXP:-${SCENARIO}_vlmlora}; RIG_ARGS=() ;;
+  *) echo "RIG=full|square"; exit 2 ;;
+esac                                    # tag of the trained models: runs/${EXP}_{rgb,rgbd}, results/closed_${EXP}_*
 export CK_RULE=${CK_RULE:-best}
 # entry-VLA's recipe (whole action expert, 16-step chunks, 8 executed, arm prompt) + backbone adaptation: the connector
 # (image projector) trains fully, rank-16 LoRA on the attention of all 16 VLM layers (depth joins before the first one), both at half the lr
 TRAIN_EXTRA=${TRAIN_EXTRA-train.mode=expert model.horizon=16 model.n_action_steps=8 data.arm_prompt=true model.vlm_lora_r=16 model.vlm_lora_layers=16 model.vlm_lora_dropout=0.05 train.train_connector=true train.vlm_lr_mult=0.5 train.val_every=1000 train.val_batches=64}
+[ "$RIG" = full ] && TRAIN_EXTRA="$TRAIN_EXTRA model.native_resize=true model.depth_mask_invalid=true model.wrist_depth_range=[0.07,0.5]"
 case "$SCENARIO" in pick_place|pick_place_camo|open_drawer) ;;
   *) echo "set SCENARIO=pick_place|pick_place_camo|open_drawer (got '$SCENARIO')"; exit 2 ;; esac
-D=$SCENARIO                             # data prefix: data/${SCENARIO}_{normal_train,normal_val,low_contrast_val}_w*
+D=$SCENARIO; [ "$RIG" = full ] && D=${SCENARIO}_full                         # data prefix: data/${SCENARIO}_{normal_train,normal_val,low_contrast_val}_w*
 [[ "$GPU" =~ ^[0-9]+$ ]] || { echo "set GPU=<number> (nvidia-smi shows which one is free)"; exit 2; }
 selected() { cat "runs/${EXP}_$1/selected_checkpoint.txt"; }   # written by run_experiment.sh
 P=logs/pipeline; mkdir -p "$P" logs results runs data
@@ -73,7 +81,7 @@ record() { # record STAGE OUT WORKERS EPISODES SEED0 CONDITION
   local d; for d in "data/$2"_w*; do
     [ -e "$d" ] && { echo "$d already exists but stage $1 is not marked done: remove it or 'touch $P/$1.done'"; return 1; }
   done
-  DUO_GPU=$GPU in_env "$ISAAC_ENV" bash sim/collect_parallel.sh "data/$2" "$3" "$4" "$5" --condition "$6" --scenario "$SCENARIO"
+  DUO_GPU=$GPU in_env "$ISAAC_ENV" bash sim/collect_parallel.sh "data/$2" "$3" "$4" "$5" --condition "$6" --scenario "$SCENARIO" "${RIG_ARGS[@]}"
 }
 
 offline_lc() { # offline_lc MODEL : action error on the low-contrast validation episodes (never trained on)
@@ -99,7 +107,7 @@ closed_loop() { # closed_loop MODEL : serve it once, roll it out under normal an
     [ -s "$out" ] && continue
     for try in 1 2 3 4; do
       DUO_GPU=$GPU in_env "$ISAAC_ENV" python sim/eval_closed_loop.py --scenario "$SCENARIO" --port "$PORT" --episodes "$EVAL_EPS" --seed0 2000000 \
-          --condition "$cond" --out "$out"
+          --condition "$cond" "${RIG_ARGS[@]}" --out "$out"
       [ -s "$out" ] && break
       echo "attempt $try for $m/$cond produced no result file; retrying"; sleep 10
     done
